@@ -182,39 +182,61 @@ def check_mtls_and_routing():
     logging.info("✅ mTLS and Traffic Routing checks PASSED.")
 
 def check_ingress_gateway():
-    """Checks the Ingress Gateway by curling from outside the mesh."""
+    """4. Checking Ingress Gateway"""
     logging.info("--- 4. Checking Ingress Gateway ---")
+
+    logging.info("STEP 1: Applying Ingress Gateway and VirtualService...")
+    # This applies your ingress.yaml which defines the Gateway
+    # and the VirtualService for {INGRESS_HOST} with the /get route
+    apply_yaml_template(INGRESS_TEMPLATE_PATH) 
     
-    logging.info("Waiting to get Ingress Gateway IP...")
-    ingress_ip = ""
-    for _ in range(10):
-        ip_cmd = f"kubectl get service {INGRESS_SERVICE} -n {ISTIO_NAMESPACE} -o jsonpath='{{.status.loadBalancer.ingress[0].ip}}'"
-        hostname_cmd = f"kubectl get service {INGRESS_SERVICE} -n {ISTIO_NAMESPACE} -o jsonpath='{{.status.loadBalancer.ingress[0].hostname}}'"
-        
-        ingress_ip = run_command(ip_cmd, check=False)
-        if not ingress_ip:
-            ingress_ip = run_command(hostname_cmd, check=False)
-            
-        if ingress_ip:
-            logging.info(f"Got Ingress IP/Hostname: {ingress_ip}")
-            break
-        logging.warning("Ingress IP not available yet, retrying in 10s...")
+    logging.info(f"STEP 2: Waiting to get external IP/Hostname for Ingress Gateway service ({INGRESS_SERVICE})...")
+    ingress_address = ""
+    # Try for 180 seconds (18 attempts * 10 seconds)
+    for i in range(18): 
+        try:
+            # This jsonpath robustly gets *either* the hostname or IP, whichever is assigned
+            ingress_address = run_command(
+                f"kubectl get svc {INGRESS_SERVICE} -n {ISTIO_NAMESPACE} -o jsonpath='{{.status.loadBalancer.ingress[0].ip}}{{.status.loadBalancer.ingress[0].hostname}}'",
+                check=False,
+                timeout=10
+            )
+            if ingress_address:
+                logging.info(f"Ingress Gateway external address found: {ingress_address}")
+                break
+        except Exception as e:
+            # This handles transient errors from kubectl
+            logging.warning(f"Error checking ingress status (will retry): {e}")
+
+        if i < 17: # Don't log "retrying" on the final attempt
+            logging.warning(f"Ingress address not available yet, retrying in 10s... (Attempt {i+1}/18)")
         time.sleep(10)
     
-    if not ingress_ip:
-        logging.error("Could not get Ingress Gateway IP after 100s.")
-        raise Exception("Ingress IP lookup failed")
+    if not ingress_address:
+        logging.error("FAILURE: Ingress Gateway external address lookup failed after 180s.")
+        raise Exception("Ingress Gateway address lookup failed")
+        
+    logging.info(f"STEP 3: Testing external traffic to http://{INGRESS_HOST}/get...")
+    logging.info(f"(This will resolve {INGRESS_HOST} to {ingress_address})")
+    
+    # It can take time for cloud provider load balancers and routes to be ready
+    logging.info("Waiting 15s for cloud load balancer and routes to propagate...")
+    time.sleep(15)
 
-    logging.info(f"Curling Ingress Gateway at {ingress_ip} with host {INGRESS_HOST}...")
-    curl_command = f"curl -s -o /dev/null -w '%{{http_code}}' --resolve {INGRESS_HOST}:80:{ingress_ip} http://{INGRESS_HOST}/get"
+    # We use 'curl --resolve' to manually tell curl which IP to use for our
+    # host. This bypasses any slow DNS propagation.
+    # We are testing the /get path you specified in your ingress.yaml.
+    http_code = run_command(
+        f"curl -s -o /dev/null -w '%{{http_code}}' --resolve '{INGRESS_HOST}:80:{ingress_address}' http://{INGRESS_HOST}/get",
+        timeout=10
+    )
     
-    http_code = run_command(curl_command)
-    
-    if http_code == "200" or http_code == "404":
-        logging.info(f"Ingress returned HTTP {http_code}. Routing successful!")
+    if http_code == "200":
+        logging.info(f"✅ Ingress returned HTTP {http_code}. Success!")
     else:
-        logging.error(f"Ingress test failed. Expected 200 or 404, got {http_code}")
-        raise Exception("Ingress Gateway test FAILED")
+        logging.error(f"FAILURE: Ingress Gateway test FAILED. Expected 200, got {http_code}")
+        logging.error(f"Failed to curl http://{INGRESS_HOST}/get (via {ingress_address})")
+        raise Exception(f"Ingress Gateway check FAILED (HTTP {http_code})")
         
     logging.info("✅ Ingress Gateway check PASSED.")
 
