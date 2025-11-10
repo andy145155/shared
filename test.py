@@ -146,43 +146,38 @@ def setup_test_apps():
 
 # ... (check_mtls_and_routing, check_ingress_gateway are unchanged) ...
 def check_mtls_and_routing():
-    """3. Checking mTLS and Traffic Routing"""
-    logging.info("--- 3. Checking mTLS and Traffic Routing ---")
+    """3. Checking mTLS and Traffic Routing (in Global STRICT mode)"""
+    logging.info("--- 3. Checking mTLS and Traffic Routing (Global STRICT mode) ---")
 
-    # --- Test 1: Initial Pod-to-Pod Connectivity ---
-    logging.info("STEP 1: Testing initial sidecar-to-sidecar connectivity (default PERMISSIVE mode)...")
+    # --- Test 1: Verify mTLS-Encrypted Traffic (Sidecar-to-Sidecar) ---
+    logging.info("STEP 1: Testing mTLS-encrypted traffic from sidecar pod (should SUCCEED)...")
+    # This validates that pod-to-pod traffic works under the global STRICT default.
     run_command(f"kubectl exec {CLIENT_APP_NAME} -n {TEST_NAMESPACE} -- curl -s -f --connect-timeout 5 http://{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:8000/v1/template/ping")
-    logging.info("✅ Initial pod-to-pod connectivity successful.")
+    logging.info("✅ mTLS-encrypted traffic (sidecar-to-sidecar) is working.")
     
-    # --- Test 2: Enable mTLS STRICT and Block Plain-Text ---
-    logging.info("STEP 2: Applying mTLS STRICT PeerAuthentication policy...")
-    apply_yaml_template(MTLS_STRICT_TEMPLATE_PATH)
-
-    logging.info("Deploying non-sidecar 'curl-no-sidecar' pod for plain-text test...")
+    # --- Test 2: Verify Plain-Text Traffic is BLOCKED ---
+    logging.info("STEP 2: Deploying non-sidecar 'curl-no-sidecar' pod for plain-text test...")
     apply_yaml_template(CURL_NO_SIDECAR_TEMPLATE_PATH)
+    
     logging.info("Waiting for 'curl-no-sidecar' pod to be ready...")
     run_command(f"kubectl wait --for=condition=Ready pod/curl-no-sidecar -n {TEST_NAMESPACE} --timeout=180s")
     
-    logging.info("Waiting 10s for mTLS STRICT policy to propagate to all pods...")
-    time.sleep(10) 
+    # Short wait for pod networking to be fully ready
+    logging.info("Waiting 5s for pod networking to settle...")
+    time.sleep(5) 
 
     logging.info("STEP 3: Testing plain-text traffic from non-sidecar pod (should be BLOCKED)...")
+    # This validates that the global STRICT mode is correctly enforced.
     stdout = run_command(
         f"kubectl exec curl-no-sidecar -n {TEST_NAMESPACE} -- curl -s --connect-timeout 5 http://{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:8000/v1/template/ping",
         check=False
     )
+    
     if stdout == "":
         logging.info("✅ Plain-text traffic successfully BLOCKED as expected.")
     else:
         logging.error(f"FAILURE: Plain-text traffic was NOT blocked. mTLS STRICT test FAILED. Output: {stdout}")
-        raise Exception("mTLS STRICT test FAILED")
-
-    # --- Test 3: Verify Encrypted Traffic Still Works ---
-    # This is the "after" test. It confirms that valid, mTLS-encrypted 
-    # traffic from a pod with a sidecar is still allowed.
-    logging.info("STEP 4: Testing mTLS-encrypted traffic from sidecar pod (should SUCCEED)...")
-    run_command(f"kubectl exec {CLIENT_APP_NAME} -n {TEST_NAMESPACE} -- curl -s -f --connect-timeout 5 http://{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:8000/v1/template/ping")
-    logging.info("✅ mTLS-encrypted traffic successful in STRICT mode.")
+        raise Exception("Global mTLS STRICT test FAILED: Plain-text traffic was allowed")
 
     logging.info("✅ mTLS and Traffic Routing checks PASSED.")
 
