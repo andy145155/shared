@@ -181,27 +181,31 @@ def check_mtls_and_routing():
 
     logging.info("✅ mTLS and Traffic Routing checks PASSED.")
 
+import socket # <--- ADD THIS IMPORT AT THE TOP OF YOUR SCRIPT
+import logging
+import time
+# ... (rest of your imports and script)
+
 def check_ingress_gateway():
-    """4. Checking Ingress Gateway"""
+    """4. Checking Ingress Gateway (via HTTPS and IP resolution)"""
     logging.info("--- 4. Checking Ingress Gateway ---")
 
+    # Note: This assumes your ingress.yaml (with the 'tls:' block)
+    # is already in your ConfigMap and applied by this function.
     logging.info("STEP 1: Applying Ingress Gateway and VirtualService...")
     apply_yaml_template(INGRESS_TEMPLATE_PATH) 
     
-    logging.info(f"STEP 2: Waiting to get external IP/Hostname for Ingress Gateway service ({INGRESS_SERVICE})...")
-    ingress_address = ""
-    # Try for 180 seconds (18 attempts * 10 seconds)
+    logging.info(f"STEP 2: Waiting to get external Hostname for Ingress Gateway service ({INGRESS_SERVICE})...")
+    ingress_hostname = ""
     for i in range(18): 
         try:
-            # --- REVISION 1: More robust jsonpath ---
-            # This gets either the .ip or .hostname, whichever is assigned
-            ingress_address = run_command(
-                f"kubectl get svc {INGRESS_SERVICE} -n {ISTIO_NAMESPACE} -o jsonpath='{{.status.loadBalancer.ingress[0].ip}}{{.status.loadBalancer.ingress[0].hostname}}'",
+            ingress_hostname = run_command(
+                f"kubectl get svc {INGRESS_SERVICE} -n {ISTIO_NAMESPACE} -o jsonpath='{{.status.loadBalancer.ingress[0].hostname}}'",
                 check=False,
                 timeout=10
             )
-            if ingress_address:
-                logging.info(f"Ingress Gateway external address found: {ingress_address}")
+            if ingress_hostname:
+                logging.info(f"Ingress Gateway external hostname found: {ingress_hostname}")
                 break
         except Exception as e:
             logging.warning(f"Error checking ingress status (will retry): {e}")
@@ -210,22 +214,32 @@ def check_ingress_gateway():
             logging.warning(f"Ingress address not available yet, retrying in 10s... (Attempt {i+1}/18)")
         time.sleep(10)
     
-    if not ingress_address:
-        logging.error("FAILURE: Ingress Gateway external address lookup failed after 180s.")
+    if not ingress_hostname:
+        logging.error("FAILURE: Ingress Gateway external hostname lookup failed after 180s.")
         raise Exception("Ingress Gateway address lookup failed")
         
-    logging.info(f"STEP 3: Testing external traffic to http://{INGRESS_HOST}/v1/template/ping...")
-    logging.info(f"(This will resolve {INGRESS_HOST} to {ingress_address})")
+    # --- NEW STEP: Resolve Hostname to IP ---
+    logging.info(f"STEP 3: Resolving {ingress_hostname} to an IP address...")
+    try:
+        # This is the Python equivalent of 'nslookup'
+        ingress_ip = socket.gethostbyname(ingress_hostname)
+        logging.info(f"Resolved {ingress_hostname} to IP: {ingress_ip}")
+    except socket.gaierror as e:
+        logging.error(f"Could not resolve hostname {ingress_hostname} to an IP: {e}")
+        raise Exception(f"DNS resolution failed for {ingress_hostname}")
+    # ----------------------------------------
+        
+    logging.info(f"STEP 4: Testing external HTTPS traffic to https://{INGRESS_HOST}/v1/template/ping...")
+    logging.info(f"(This will resolve {INGRESS_HOST} to {ingress_ip} on port 443)")
     
     logging.info("Waiting 15s for cloud load balancer and routes to propagate...")
     time.sleep(15)
 
-    # --- REVISION 2: Use --resolve for a more reliable test ---
-    # This bypasses DNS and forces curl to use the IP/hostname we found.
-    # NOTE: Assumes your gateway is on port 80. Change "80" and "http"
-    # if you are testing port 443 (HTTPS).
+    # --- MODIFIED COMMAND: Use the IP address in --resolve ---
     http_code = run_command(
-        f"curl -s -o /dev/null -w '%{{http_code}}' --resolve '{INGRESS_HOST}:80:{ingress_address}' http://{INGRESS_HOST}/v1/template/ping",
+        f"curl -k -s -o /dev/null -w '%{{http_code}}' "
+        f"--resolve {INGRESS_HOST}:443:{ingress_ip} "  # <-- Use the resolved IP
+        f"https://{INGRESS_HOST}/v1/template/ping",
         timeout=10
     )
     
@@ -233,7 +247,7 @@ def check_ingress_gateway():
         logging.info(f"✅ Ingress returned HTTP {http_code}. Success!")
     else:
         logging.error(f"FAILURE: Ingress Gateway test FAILED. Expected 200, got {http_code}")
-        logging.error(f"Failed to curl http://{INGRESS_HOST}/v1/template/ping (via {ingress_address})")
+        logging.error(f"Failed to curl https://{INGRESS_HOST}/v1/template/ping (via {ingress_ip}:443)")
         raise Exception(f"Ingress Gateway check FAILED (HTTP {http_code})")
         
     logging.info("✅ Ingress Gateway check PASSED.")
