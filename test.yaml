@@ -135,3 +135,128 @@ data:
                 - name: "retry-after"
                   format: SECONDS
                 max_interval: "5s" # Max time to wait
+
+
+
+
+# Add this key to your ConfigMap
+  egress-se-google.yaml: |
+    apiVersion: networking.istio.io/v1alpha3
+    kind: ServiceEntry
+    metadata:
+      name: google-se
+      namespace: {TEST_NAMESPACE}
+    spec:
+      hosts:
+      - "www.google.com"
+      ports:
+      - number: 80
+        name: http
+        protocol: HTTP
+      - number: 443
+        name: https
+        protocol: HTTPS
+      resolution: DNS
+
+  # Add this key to your ConfigMap
+  egress-dr-vs-google.yaml: |
+    apiVersion: networking.istio.io/v1alpha3
+    kind: VirtualService
+    metadata:
+      name: google-vs
+      namespace: {TEST_NAMESPACE}
+    spec:
+      hosts:
+      - "www.google.com"
+      http:
+      - match:
+        - port: 80 # <-- Match plain HTTP requests
+        route:
+        - destination:
+            host: "www.google.com"
+            port:
+              number: 443 # <-- Reroute them to HTTPS port 443
+          weight: 100
+    ---
+    apiVersion: networking.istio.io/v1alpha3
+    kind: DestinationRule
+    metadata:
+      name: google-dr
+      namespace: {TEST_NAMESPACE}
+    spec:
+      host: "www.google.com"
+      trafficPolicy:
+        portLevelSettings:
+        - port:
+            number: 443
+          tls:
+            mode: SIMPLE # <-- Perform TLS Origination
+            sni: "www.google.com"
+
+# Add this key to your ConfigMap
+  retry-vs.yaml: |
+    apiVersion: networking.istio.io/v1alpha3
+    kind: VirtualService
+    metadata:
+      name: retry-test-vs
+      namespace: {TEST_NAMESPACE}
+    spec:
+      hosts:
+      - "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local"
+      http:
+      - match:
+        - uri:
+            prefix: /retry-test
+        fault:
+          abort:
+            httpStatus: 503
+            percentage:
+              value: 100
+        headers:
+          response:
+            set:
+              "retry-after": "2" # Tell client to wait 2 seconds
+        route:
+        - destination:
+            host: "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local"
+            port:
+              number: 8000
+          retries:
+            attempts: 3 # 1 initial + 2 retries
+            perTryTimeout: 1s
+            retryOn: "5xx"
+      - route:
+        - destination:
+            host: "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local"
+            port:
+              number: 8000
+
+  # Add this key to your ConfigMap
+  retry-envoyfilter.yaml: |
+    apiVersion: networking.istio.io/v1alpha3
+    kind: EnvoyFilter
+    metadata:
+      name: retry-after-filter
+      namespace: {TEST_NAMESPACE} # Must be in same namespace as pod
+    spec:
+      workloadSelector:
+        labels:
+          app: {CLIENT_APP_NAME} # <-- FIXED: Selects your client pod
+      configPatches:
+      - applyTo: HTTP_ROUTE
+        match:
+          context: SIDECAR_OUTBOUND
+          routeConfiguration:
+            vhost:
+              name: "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:8000"
+              route:
+                name: retry-test-vs # Matches the VS route
+        patch:
+          operation: MERGE
+          value:
+            retry_policy:
+              rate_limited_retry_back_off:
+                reset_headers:
+                - name: "retry-after"
+                  format: SECONDS
+                max_interval: "5s" # Max wait time

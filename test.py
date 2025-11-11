@@ -254,44 +254,40 @@ def check_ingress_gateway():
 
 # --- ADD NEW FUNCTION ---
 def check_retry_after():
-    """Checks if the client-side proxy respects the retry-after header."""
-    logging.info("--- 5. Checking Retry-After Header ---")
+    """5. Checking Retry-After Header (EnvoyFilter)"""
+    logging.info("--- 5. Checking Retry-After Header (EnvoyFilter) ---")
     
-    logging.info("Applying VirtualService (for fault) and EnvoyFilter (for retry policy)...")
+    logging.info("STEP 1: Applying VirtualService (to cause 503s) and EnvoyFilter (to read retry-after)...")
     apply_yaml_template(RETRY_VS_TEMPLATE_PATH)
     apply_yaml_template(RETRY_ENVOYFILTER_TEMPLATE_PATH)
     
-    logging.info("Waiting 10s for EnvoyFilter config to propagate...")
+    logging.info("Waiting 10s for EnvoyFilter config to propagate to the client pod...")
     time.sleep(10)
     
-    logging.info("Starting retry test. This should take ~6-7 seconds...")
-    logging.info("(3 attempts, 2-second 'retry-after' delay per attempt)")
+    logging.info("STEP 2: Starting retry test. This should take ~4-7 seconds...")
+    logging.info("Test logic: 1st request fails (503) -> wait 2s (from header) -> 2nd request fails (503) -> wait 2s -> 3rd request fails (503).")
+    logging.info("Total wait time should be ~4s, plus overhead.")
     
     start_time = time.time()
-    
     # We expect this command to fail, so check=False
     run_command(
-        f"kubectl exec curl-client -n {TEST_NAMESPACE} -- curl -s -o /dev/null http://test-target-app.{TEST_NAMESPACE}.svc.cluster.local:8000/retry-test",
+        f"kubectl exec {CLIENT_APP_NAME} -n {TEST_NAMESPACE} -- curl -s -o /dev/null http://{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:8000/retry-test",
         check=False
     )
-    
     end_time = time.time()
     duration = end_time - start_time
-    logging.info(f"Test completed in {duration:.2f} seconds.")
     
-    # Test logic: 1st attempt (instant) + 2s wait + 2nd attempt + 2s wait + 3rd attempt
-    # Total = 2 retries = ~4s. (3 attempts total).
-    # Let's adjust. 3 attempts, 2 retries. 1st fails, wait 2s, 2nd fails, wait 2s, 3rd fails.
-    # Total duration should be > 4 seconds.
-    # The runbook showed 6.99s for 3 retries (retry-after: 2).
-    # Let's aim for a window between 5 and 8 seconds.
+    logging.info(f"Test complete in {duration:.2f} seconds.")
     
-    if duration >= 5 and duration <= 8:
-        logging.info("✅ Retry-After test PASSED. Duration is within the expected range.")
+    # Check if the duration is within the expected window (4s wait + overhead)
+    if 5 <= duration <= 8:
+        logging.info(f"✅ Retry-After test PASSED. Duration ({duration:.2f}s) is within the expected range (5-8s).")
     else:
-        logging.error(f"Retry-After test FAILED. Duration was {duration:.2f}s, expected ~6s.")
-        raise Exception("Retry-After test duration was outside the expected range.")
+        logging.error(f"FAILURE: Retry-After test duration was outside the expected range. Got {duration:.2f}s")
+        raise Exception(f"Retry-After test FAILED. Duration: {duration:.2f}s")
 
+
+        
 # --- ADD NEW FUNCTION ---
 def check_egress_tls_origination():
     """Checks if the sidecar can originate TLS for external traffic."""
@@ -305,6 +301,36 @@ def check_egress_tls_origination():
     )
     logging.info("Egress (TLS Origination) to external HTTPS site is working.")
     logging.info("✅ Egress check PASSED.")
+
+def check_egress_tls_origination():
+    """6. Checking Egress (Sidecar TLS Origination)"""
+    logging.info("--- 6. Checking Egress (Sidecar TLS Origination) ---")
+    
+    logging.info("STEP 1: Applying ServiceEntry, VirtualService, and DestinationRule for www.google.com...")
+    # This configuration will intercept HTTP traffic to google.com
+    # and upgrade it to HTTPS (TLS Origination).
+    apply_yaml_template(EGRESS_SE_TEMPLATE_PATH)
+    apply_yaml_template(EGRESS_DR_VS_TEMPLATE_PATH)
+
+    logging.info("Waiting 10s for egress rules to propagate...")
+    time.sleep(10)
+
+    logging.info("STEP 2: Testing TLS Origination by curling HTTP (port 80)...")
+    logging.info("The sidecar should intercept 'http://www.google.com' and upgrade it to 'https://www.google.com'.")
+    
+    # We test by curling HTTP. If the TLS origination works,
+    # google will respond with a 301 (redirect) or 200 (OK).
+    # We use -L to follow redirects.
+    http_code = run_command(
+        f"kubectl exec {CLIENT_APP_NAME} -n {TEST_NAMESPACE} -- curl -s -o /dev/null -w '%{{http_code}}' -L --connect-timeout 5 http://www.google.com",
+        check=True
+    )
+    
+    if http_code == "200":
+        logging.info(f"✅ Egress TLS Origination PASSED. Received HTTP {http_code} after following redirects.")
+    else:
+        logging.error(f"FAILURE: Egress TLS Origination test FAILED. Expected 200, got {http_code}")
+        raise Exception(f"Egress TLS Origination check FAILED (HTTP {http_code})")
 
 
 def cleanup():
