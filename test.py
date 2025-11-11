@@ -186,23 +186,39 @@ import logging
 import time
 # ... (rest of your imports and script)
 
-def check_ingress_gateway():
-    """4. Checking Ingress Gateway (via HTTPS and IP resolution)"""
-    logging.info("--- 4. Checking Ingress Gateway ---")
+import logging
+import time
+from utils import run_command # Assuming 'run_command' is in a utils file
 
-    # Note: This assumes your ingress.yaml (with the 'tls:' block)
-    # is already in your ConfigMap and applied by this function.
-    logging.info("STEP 1: Applying Ingress Gateway and VirtualService...")
-    apply_yaml_template(INGRESS_TEMPLATE_PATH) 
-    
-    logging.info(f"STEP 2: Waiting to get external Hostname for Ingress Gateway service ({INGRESS_SERVICE})...")
+# --- Variables from your environment ---
+# INGRESS_HOST = "verify-test.example.com"
+# INGRESS_SERVICE = "istio-ingressgateway"
+# ISTIO_NAMESPACE = "istio-system"
+# INGRESS_TEMPLATE_PATH = "path/to/ingress.yaml"
+# GATEWAY_NAME = "public-gateway" # <-- ADD THIS: The 'metadata.name' of your Gateway
+# ----------------------------------------
+
+def check_ingress_gateway():
+    """
+    Checks Ingress Gateway using a dynamic patch and the Host-Header method.
+    This test is robust, portable, and solves the SNI/AZ issues.
+    """
+    logging.info("--- 4. Checking Ingress Gateway (Dynamic Patch Method) ---")
+
+    # STEP 1: Apply Ingress Gateway and VirtualService
+    logging.info("STEP 1: Applying base Ingress Gateway and VirtualService...")
+    apply_yaml_template(INGRESS_TEMPLATE_PATH)
+
+    # STEP 2: Wait for external hostname for Ingress Gateway service
+    logging.info(f"STEP 2: Waiting to get external hostname for {INGRESS_SERVICE}...")
     ingress_hostname = ""
-    for i in range(18): 
+    for i in range(10): # Wait up to 100 seconds
         try:
             ingress_hostname = run_command(
-                f"kubectl get svc {INGRESS_SERVICE} -n {ISTIO_NAMESPACE} -o jsonpath='{{.status.loadBalancer.ingress[0].hostname}}'",
-                check=False,
-                timeout=10
+                f"kubectl get svc {INGRESS_SERVICE} -n {ISTIO_NAMESPACE} "
+                "-o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
+                check=True,
+                timeout=10,
             )
             if ingress_hostname:
                 logging.info(f"Ingress Gateway external hostname found: {ingress_hostname}")
@@ -210,47 +226,71 @@ def check_ingress_gateway():
         except Exception as e:
             logging.warning(f"Error checking ingress status (will retry): {e}")
 
-        if i < 17:
-            logging.warning(f"Ingress address not available yet, retrying in 10s... (Attempt {i+1}/18)")
-        time.sleep(10)
-    
-    if not ingress_hostname:
-        logging.error("FAILURE: Ingress Gateway external hostname lookup failed after 180s.")
-        raise Exception("Ingress Gateway address lookup failed")
-        
-    # --- NEW STEP: Resolve Hostname to IP ---
-    logging.info(f"STEP 3: Resolving {ingress_hostname} to an IP address...")
-    try:
-        # This is the Python equivalent of 'nslookup'
-        ingress_ip = socket.gethostbyname(ingress_hostname)
-        logging.info(f"Resolved {ingress_hostname} to IP: {ingress_ip}")
-    except socket.gaierror as e:
-        logging.error(f"Could not resolve hostname {ingress_hostname} to an IP: {e}")
-        raise Exception(f"DNS resolution failed for {ingress_hostname}")
-    # ----------------------------------------
-        
-    logging.info(f"STEP 4: Testing external HTTPS traffic to https://{INGRESS_HOST}/v1/template/ping...")
-    logging.info(f"(This will resolve {INGRESS_HOST} to {ingress_ip} on port 443)")
-    
-    logging.info("Waiting 15s for cloud load balancer and routes to propagate...")
-    time.sleep(15)
+        if i == 9:
+            logging.error("Ingress address not available yet, retrying in 10s... (Attempt 10/10)")
+            time.sleep(10)
 
-    # --- MODIFIED COMMAND: Use the IP address in --resolve ---
-    http_code = run_command(
-        f"curl -k -s -o /dev/null -w '%{{http_code}}' "
-        f"--resolve {INGRESS_HOST}:443:{ingress_ip} "  # <-- Use the resolved IP
-        f"https://{INGRESS_HOST}/v1/template/ping",
-        timeout=10
-    )
-    
-    if http_code == "200":
-        logging.info(f"✅ Ingress returned HTTP {http_code}. Success!")
-    else:
-        logging.error(f"FAILURE: Ingress Gateway test FAILED. Expected 200, got {http_code}")
-        logging.error(f"Failed to curl https://{INGRESS_HOST}/v1/template/ping (via {ingress_ip}:443)")
-        raise Exception(f"Ingress Gateway check FAILED (HTTP {http_code})")
+    if not ingress_hostname:
+        logging.error("FAILURE: Ingress Gateway external hostname lookup failed after 100s.")
+        raise Exception("Ingress Gateway address lookup failed")
+
+    # STEP 3: Dynamically patch Gateway to allow SNI for the ELB hostname
+    logging.info(f"STEP 3: Patching Gateway '{GATEWAY_NAME}' to add host: {ingress_hostname}")
+    try:
+        # This JSONPatch command appends the new hostname to the 'hosts' array
+        # at 'spec.servers[0].hosts'. The '-' means "append to array".
+        patch_command = (
+            f"kubectl patch gateway {GATEWAY_NAME} "
+            f"-n {ISTIO_NAMESPACE} --type='json' "
+            f"-p='[{{\"op\": \"add\", \"path\": \"/spec/servers/0/hosts/-\", \"value\": \"{ingress_hostname}\"}}]'"
+        )
         
-    logging.info("✅ Ingress Gateway check PASSED.")
+        run_command(patch_command, check=True, timeout=10)
+        logging.info("Gateway patch applied successfully.")
+        
+        # Wait for the patch to propagate to the ingress gateway pods
+        logging.info("Waiting 15s for Gateway patch and routes to propagate...")
+        time.sleep(15)
+
+    except Exception as e:
+        logging.error(f"FAILURE: Could not patch Gateway '{GATEWAY_NAME}': {e}")
+        # Note: You might want to add cleanup logic here to revert the patch on failure
+        raise
+
+    # STEP 4: Test external HTTPS traffic using Host header
+    logging.info(f"STEP 4: Testing external HTTPS traffic to {ingress_hostname}...")
+    logging.info(f"This test will connect to the ELB '{ingress_hostname}' "
+                 f"and pass the 'Host: {INGRESS_HOST}' header for routing.")
+    
+    http_code = ""
+    try:
+        # This is the new, robust curl command
+        http_code = run_command(
+            f"curl -k -s -o /dev/null -w '%{{http_code}}' "
+            # Use the Host header for the 'fake' DNS name
+            f"-H 'Host: {INGRESS_HOST}' "
+            # Connect directly to the real ELB hostname
+            f"https://{ingress_hostname}/v1/template/ping",
+            timeout=15,
+        )
+
+        if http_code == "200":
+            logging.info(f"Ingress returned HTTP {http_code}. Success!")
+        else:
+            logging.error(f"FAILURE: Ingress Gateway test FAILED. Expected 200, got {http_code}")
+            logging.error(
+                f"Failed to curl https://{ingress_hostname}/v1/template/ping "
+                f"(with Host: {INGRESS_HOST})"
+            )
+            raise Exception(f"Ingress Gateway check FAILED (HTTP {http_code})")
+
+    except Exception as e:
+        logging.error(f"Error during curl command: {e}")
+        raise Exception(f"Ingress Gateway check FAILED (HTTP {http_code})")
+
+    logging.info("Ingress Gateway check PASSED.")
+    # Note: You may want to add a cleanup step here or in a 'finally' block
+    # to remove the hostname from the Gateway, reverting it to its original state.
 
 # --- ADD NEW FUNCTION ---
 def check_retry_after():
