@@ -76,35 +76,41 @@ data:
       name: retry-after-test-vs
       namespace: {{TEST_NAMESPACE}}
     spec:
-      hosts:
-      - "retry-test.local" # A fake host just for this test
+      # Apply to all sidecars in the namespace
       gateways:
-      - mesh # Apply to all sidecars in the mesh
+      - mesh
+      # A fake hostname just for this test
+      hosts:
+      - "retry-test.local" 
       http:
       - name: "retry-route" # We will patch this route name
         match:
         - uri:
             prefix: "/test-retry"
+        
+        # 1. Simulate a 503 error to trigger the retry
         fault:
           abort:
-            httpStatus: 503 # 1. Force a 503 to trigger the retry
+            httpStatus: 503
             percentage:
               value: 100.0
+              
+        # 2. Tell the sidecar it's allowed to retry
         retries:
-          attempts: 3 # 2. Allow 3 total attempts
+          attempts: 3
           perTryTimeout: 1s
           retryOn: "gateway-error,connect-failure,503"
+          
+        # 3. Add the header to the *response*
         headers:
           response:
             set:
-              "retry-after": "2" # 3. Tell the client to wait 2 seconds
+              "retry-after": "2" # Tell the client to wait 2 seconds
+
+        # 4. Route to a "blackhole" (doesn't matter, the fault happens first)
         route:
         - destination:
-            # Route to a fake host. It doesn't matter,
-            # the 'fault' will happen before the request is sent.
             host: "blackhole.local"
-            port:
-              number: 80
 
   # --- ADD THIS NEW FILE ---
   retry-envoyfilter.yaml: |
@@ -114,13 +120,15 @@ data:
       name: retry-after-test-ef
       namespace: {{TEST_NAMESPACE}}
     spec:
+      # This filter will ONLY apply to your client pod
       workloadSelector:
         labels:
-          app: af-toolkit # !!! IMPORTANT: Assumes this label is on your test pod
+          app: {{CLIENT_APP_NAME}}
+          
       configPatches:
       - applyTo: HTTP_ROUTE
         match:
-          context: SIDECAR_OUTBOUND
+          context: SIDECAR_OUTBOUND # Apply to outgoing traffic
           routeConfiguration:
             vhost:
               name: "retry-test.local:80" # Must match the VS host/port
@@ -129,12 +137,10 @@ data:
         patch:
           operation: MERGE
           value:
+            # This is the "magic" that enables respecting the header
             retry_policy:
-              # This is the "magic" that enables respecting the header
               rate_limited_retry_back_off:
                 reset_headers:
                 - name: "retry-after"
                   format: SECONDS
-              # Set a max, so a bad server (e.g., "retry-after: 300")
-              # doesn't stall the test for 5 minutes.
-              max_interval: "5s"
+              max_interval: "5s" # A safety cap

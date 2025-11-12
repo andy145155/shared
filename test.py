@@ -323,70 +323,71 @@ import re
 
 def check_retry_after_header():
     """
-    Checks if the Istio sidecar respects the 'retry-after' header.
+    Checks if the client pod's sidecar respects the 'retry-after' header.
     
-    1. Applies a VirtualService to simulate a 503 error with a
-       'retry-after: 2' header.
-    2. Applies an EnvoyFilter to the test pod to *read* that header
-       for its retry back-off.
-    3. Runs 'time curl' and checks if the elapsed time is correct
-       (3 attempts - 1) * 2s = 4s.
+    1. Applies a VirtualService to simulate a 503 error + 'retry-after' header.
+    2. Applies an EnvoyFilter to the CLIENT_APP_NAME pod to read that header.
+    3. Runs 'time curl' *inside* the CLIENT_APP_NAME pod.
+    4. Checks if the total time matches the expected 4s delay.
     """
     logging.info("--- 5. Checking Retry-After Header (EnvoyFilter) ---")
     
     RETRY_SECONDS = 2  # Must match 'retry-after' in retry-vs.yaml
     ATTEMPTS = 3       # Must match 'attempts' in retry-vs.yaml
     
-    # Calculate the expected *minimum* time the test should take.
-    # (Attempts - 1) because the last attempt doesn't wait.
-    MIN_EXPECTED_TIME = RETRY_SECONDS * (ATTEMPTS - 1)
-    # Give a 3s buffer for network/curl overhead
-    MAX_EXPECTED_TIME = MIN_EXPECTED_TIME + 3 
+    # (Attempts - 1) because the last attempt doesn't wait
+    MIN_EXPECTED_TIME = RETRY_SECONDS * (ATTEMPTS - 1) # 2 * 2 = 4s
+    MAX_EXPECTED_TIME = MIN_EXPECTED_TIME + 3 # Give a 3s buffer
 
     try:
         # STEP 1: Apply the test YAMLs
         logging.info("STEP 1: Applying VirtualService and EnvoyFilter for retry test...")
+        # These functions should substitute the template variables
         apply_yaml_template(RETRY_VS_PATH)
         apply_yaml_template(RETRY_EF_PATH)
         
         logging.info("Waiting 10s for EnvoyFilter to propagate...")
         time.sleep(10)
 
-        # STEP 2: Run the test command
-        # We use 'time -p' for simple, parseable output (e.g., "real 4.02")
-        # We curl the fake host. The sidecar will intercept this.
-        logging.info(f"STEP 2: Curling fake host 'http://retry-test.local/test-retry'")
+        # STEP 2: Run the test command inside the client pod
+        logging.info(f"STEP 2: Executing 'time curl' inside pod {CLIENT_APP_NAME}...")
         logging.info(f"This should fail, but take at least {MIN_EXPECTED_TIME}s...")
         
-        # We expect this command to fail (non-zero exit code), so 'check=False'
-        # The 'time -p' output is sent to stderr, so we capture it.
-        # This is a common way to time a command in a script.
-        curl_cmd = (
-            "time -p curl -s -o /dev/null "
-            "-w '%{http_code}' " # We only want the http code as stdout
-            "http://retry-test.local/test-retry"
+        # 'time -p' prints 'real X.XX' to stderr, which is what we need.
+        # 'sh -c' is needed to run the 'time' command.
+        # 'curl' output (the http code) is captured by 'http_code'.
+        # 'time' output is captured by 'stderr_output'.
+        cmd_to_exec = (
+            f"time -p curl -s -o /dev/null "
+            f"-w '%{{http_code}}' http://retry-test.local/test-retry"
         )
         
-        # Note: 'time -p' output goes to stderr, curl output to stdout
-        output, stderr_output = run_command_with_stderr(curl_cmd, check=False)
+        full_command = (
+            f"kubectl exec -n {TEST_NAMESPACE} {CLIENT_APP_NAME} "
+            f"-c {CLIENT_CONTAINER_NAME} -- sh -c \"{cmd_to_exec}\""
+        )
+        
+        # You need a modified run_command that captures both stdout and stderr
+        http_code, stderr_output = run_command_with_stderr(full_command, check=False)
         
         # STEP 3: Parse the 'time' output from stderr
         logging.info(f"Raw 'time' output (from stderr):\n{stderr_output}")
         
         real_time = 0.0
+        # Search for 'real X.XX' in the stderr output
         match = re.search(r"real\s+([0-9\.]+)", stderr_output)
         if match:
             real_time = float(match.group(1))
         
-        logging.info(f"Test completed. HTTP code: '{output}', Elapsed time: {real_time}s")
+        logging.info(f"Test completed. HTTP code: '{http_code}', Elapsed time: {real_time}s")
 
         # STEP 4: Validate the results
-        if output == "503" and real_time >= MIN_EXPECTED_TIME and real_time < MAX_EXPECTED_TIME:
+        if http_code == "503" and real_time >= MIN_EXPECTED_TIME and real_time < MAX_EXPECTED_TIME:
             logging.info(f"SUCCESS: Test took {real_time}s (within {MIN_EXPECTED_TIME}-{MAX_EXPECTED_TIME}s range) and returned 503.")
             logging.info("Retry-After header was correctly respected.")
         else:
-            if output != "503":
-                logging.error(f"FAILURE: Expected HTTP 503, but got '{output}'")
+            if http_code != "503":
+                logging.error(f"FAILURE: Expected HTTP 503, but got '{http_code}'")
             if not (real_time >= MIN_EXPECTED_TIME and real_time < MAX_EXPECTED_TIME):
                 logging.error(f"FAILURE: Test time ({real_time}s) was outside expected range ({MIN_EXPECTED_TIME}-{MAX_EXPECTED_TIME}s).")
             raise Exception("Retry-After test FAILED.")
@@ -394,6 +395,7 @@ def check_retry_after_header():
     finally:
         # STEP 5: Cleanup
         logging.info("Cleaning up retry test resources...")
+        # Use your template function if it handles deletion, otherwise kubectl
         run_command(f"kubectl delete -f {RETRY_VS_PATH}", check=False)
         run_command(f"kubectl delete -f {RETRY_EF_PATH}", check=False)
         
