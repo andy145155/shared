@@ -181,44 +181,39 @@ def check_mtls_and_routing():
 
     logging.info("✅ mTLS and Traffic Routing checks PASSED.")
 
-import socket # <--- ADD THIS IMPORT AT THE TOP OF YOUR SCRIPT
-import logging
-import time
-# ... (rest of your imports and script)
-
-import logging
-import time
-from utils import run_command # Assuming 'run_command' is in a utils file
-
-# --- Variables from your environment ---
-# INGRESS_HOST = "verify-test.example.com"
-# INGRESS_SERVICE = "istio-ingressgateway"
-# ISTIO_NAMESPACE = "istio-system"
-# INGRESS_TEMPLATE_PATH = "path/to/ingress.yaml"
-# GATEWAY_NAME = "public-gateway" # <-- ADD THIS: The 'metadata.name' of your Gateway
-# ----------------------------------------
-
 def check_ingress_gateway():
     """
-    Checks Ingress Gateway using a dynamic patch and the Host-Header method.
-    This test is robust, portable, and solves the SNI/AZ issues.
+    Checks the full end-to-end Ingress flow by simulating an external user.
+    
+    This test is complex because we are *inside* the cluster trying to test
+    the *outside* path. This causes two problems:
+    1. Network Problem: Connecting to the public ELB IP is unreliable (hairpin NAT).
+    2. Security Problem: We connect to the ELB hostname, but Istio expects the
+                       'verify-test.example.com' hostname (SNI mismatch).
+                       
+    This function solves both by:
+    1. Connecting to the reliable internal ClusterIP.
+    2. Patching the Gateway to temporarily allow the ELB's hostname for the SNI check.
+    3. Using 'curl --resolve' to tie it all together.
     """
-    logging.info("--- 4. Checking Ingress Gateway (Dynamic Patch Method) ---")
+    logging.info("--- 4. Checking Ingress Gateway (Internal --resolve Method) ---")
 
-    # STEP 1: Apply Ingress Gateway and VirtualService
+    # STEP 1: Apply the base Gateway and VirtualService
+    # This creates the 'verify-test.example.com' route.
     logging.info("STEP 1: Applying base Ingress Gateway and VirtualService...")
     apply_yaml_template(INGRESS_TEMPLATE_PATH)
 
-    # STEP 2: Wait for external hostname for Ingress Gateway service
-    logging.info(f"STEP 2: Waiting to get external hostname for {INGRESS_SERVICE}...")
+    # STEP 2: Get the public ELB hostname
+    # We need this *name* to test the SNI check.
+    # e.g., "vault-ingressgateway-f5e1cca4f31bdc8e.elb.ap-east-1.amazonaws.com"
+    logging.info(f"STEP 2: Waiting to get external ELB hostname for {INGRESS_SERVICE}...")
     ingress_hostname = ""
-    for i in range(10): # Wait up to 100 seconds
+    for i in range(10): 
         try:
             ingress_hostname = run_command(
                 f"kubectl get svc {INGRESS_SERVICE} -n {ISTIO_NAMESPACE} "
                 "-o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
-                check=True,
-                timeout=10,
+                check=True, timeout=10,
             )
             if ingress_hostname:
                 logging.info(f"Ingress Gateway external hostname found: {ingress_hostname}")
@@ -227,61 +222,86 @@ def check_ingress_gateway():
             logging.warning(f"Error checking ingress status (will retry): {e}")
 
         if i == 9:
-            logging.error("Ingress address not available yet, retrying in 10s... (Attempt 10/10)")
             time.sleep(10)
 
     if not ingress_hostname:
-        logging.error("FAILURE: Ingress Gateway external hostname lookup failed after 100s.")
+        logging.error("FAILURE: Ingress Gateway external hostname lookup failed.")
         raise Exception("Ingress Gateway address lookup failed")
 
-    # STEP 3: Dynamically patch Gateway to allow SNI for the ELB hostname
+    # STEP 3: Patch the Gateway to fix the SNI mismatch
+    # We add the public ELB hostname to the Gateway's 'hosts' list.
+    # This tells Istio: "It's OK to accept a TLS connection (SNI)
+    # for the ELB's public name."
     logging.info(f"STEP 3: Patching Gateway '{GATEWAY_NAME}' to add host: {ingress_hostname}")
     try:
-        # This JSONPatch command appends the new hostname to the 'hosts' array
-        # at 'spec.servers[0].hosts'. The '-' means "append to array".
         patch_command = (
             f"kubectl patch gateway {GATEWAY_NAME} "
             f"-n {ISTIO_NAMESPACE} --type='json' "
             f"-p='[{{\"op\": \"add\", \"path\": \"/spec/servers/0/hosts/-\", \"value\": \"{ingress_hostname}\"}}]'"
         )
-        
         run_command(patch_command, check=True, timeout=10)
         logging.info("Gateway patch applied successfully.")
         
-        # Wait for the patch to propagate to the ingress gateway pods
+        # Wait for Istio to see the config change
         logging.info("Waiting 15s for Gateway patch and routes to propagate...")
         time.sleep(15)
 
     except Exception as e:
         logging.error(f"FAILURE: Could not patch Gateway '{GATEWAY_NAME}': {e}")
-        # Note: You might want to add cleanup logic here to revert the patch on failure
         raise
 
-    # STEP 4: Test external HTTPS traffic using Host header
-    logging.info(f"STEP 4: Testing external HTTPS traffic to {ingress_hostname}...")
-    logging.info(f"This test will connect to the ELB '{ingress_hostname}' "
-                 f"and pass the 'Host: {INGRESS_HOST}' header for routing.")
+    # STEP 4: Get the reliable *internal* ClusterIP
+    # We use this IP to connect because it avoids the unreliable "hairpin NAT"
+    # problem (where our pod hangs trying to connect to its own public IP).
+    # e.g., "172.20.64.46"
+    logging.info(f"STEP 4: Getting internal ClusterIP for {INGRESS_SERVICE}...")
+    internal_cluster_ip = ""
+    try:
+        internal_cluster_ip = run_command(
+            f"kubectl get svc {INGRESS_SERVICE} -n {ISTIO_NAMESPACE} "
+            "-o jsonpath='{.spec.clusterIP}'",
+            check=True, timeout=10,
+        )
+        if not internal_cluster_ip:
+            raise Exception("ClusterIP was empty")
+        logging.info(f"Found internal ClusterIP: {internal_cluster_ip}")
+    except Exception as e:
+        logging.error(f"FAILURE: Could not get internal ClusterIP: {e}")
+        raise
+
+    # STEP 5: Run the final test
+    # This curl command simulates the full external request perfectly.
+    logging.info(f"STEP 5: Testing external HTTPS flow via internal ClusterIP...")
     
     http_code = ""
     try:
-        # This is the new, robust curl command
-        http_code = run_command(
+        curl_cmd = (
             f"curl -k -s -o /dev/null -w '%{{http_code}}' "
-            # Use the Host header for the 'fake' DNS name
+            
+            # 1. (FOR VIRTUALSERVICE)
+            # Send the 'Host' header Istio needs for routing.
             f"-H 'Host: {INGRESS_HOST}' "
-            # Connect directly to the real ELB hostname
-            f"https://{ingress_hostname}/v1/template/ping",
-            timeout=15,
+            
+            # 2. (FOR RELIABLE CONNECTION + SNI)
+            # Tell curl: "When you *think* you're connecting to the
+            # {ingress_hostname}, *actually* connect to the
+            # reliable {internal_cluster_ip}."
+            # This makes the connection reliable AND sends the correct SNI.
+            f"--resolve {ingress_hostname}:443:{internal_cluster_ip} "
+            
+            # 3. (THE URL)
+            # The URL we are connecting to, which triggers the SNI check.
+            f"https://{ingress_hostname}/v1/template/ping"
         )
+        
+        logging.info(f"Running command: {curl_cmd}")
+        http_code = run_command(curl_cmd, timeout=15, check=True)
 
+        # Check if we got a 200 OK
         if http_code == "200":
             logging.info(f"Ingress returned HTTP {http_code}. Success!")
         else:
             logging.error(f"FAILURE: Ingress Gateway test FAILED. Expected 200, got {http_code}")
-            logging.error(
-                f"Failed to curl https://{ingress_hostname}/v1/template/ping "
-                f"(with Host: {INGRESS_HOST})"
-            )
             raise Exception(f"Ingress Gateway check FAILED (HTTP {http_code})")
 
     except Exception as e:
@@ -289,8 +309,6 @@ def check_ingress_gateway():
         raise Exception(f"Ingress Gateway check FAILED (HTTP {http_code})")
 
     logging.info("Ingress Gateway check PASSED.")
-    # Note: You may want to add a cleanup step here or in a 'finally' block
-    # to remove the hostname from the Gateway, reverting it to its original state.
 
 # --- ADD NEW FUNCTION ---
 def check_retry_after():
