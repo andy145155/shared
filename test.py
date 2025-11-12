@@ -310,41 +310,114 @@ def check_ingress_gateway():
 
     logging.info("Ingress Gateway check PASSED.")
 
-# --- ADD NEW FUNCTION ---
-def check_retry_after():
-    """5. Checking Retry-After Header (EnvoyFilter)"""
+import logging
+import time
+import re
+
+# --- Variables from your environment ---
+# TEST_NAMESPACE = "af-toolkit"
+# RETRY_VS_PATH = "path/to/retry-vs.yaml"
+# RETRY_EF_PATH = "path/to/retry-ef.yaml"
+# (Make sure the YAML files above are at these paths)
+# ----------------------------------------
+
+def check_retry_after_header():
+    """
+    Checks if the Istio sidecar respects the 'retry-after' header.
+    
+    1. Applies a VirtualService to simulate a 503 error with a
+       'retry-after: 2' header.
+    2. Applies an EnvoyFilter to the test pod to *read* that header
+       for its retry back-off.
+    3. Runs 'time curl' and checks if the elapsed time is correct
+       (3 attempts - 1) * 2s = 4s.
+    """
     logging.info("--- 5. Checking Retry-After Header (EnvoyFilter) ---")
     
-    logging.info("STEP 1: Applying VirtualService (to cause 503s) and EnvoyFilter (to read retry-after)...")
-    apply_yaml_template(RETRY_VS_TEMPLATE_PATH)
-    apply_yaml_template(RETRY_ENVOYFILTER_TEMPLATE_PATH)
+    RETRY_SECONDS = 2  # Must match 'retry-after' in retry-vs.yaml
+    ATTEMPTS = 3       # Must match 'attempts' in retry-vs.yaml
     
-    logging.info("Waiting 10s for EnvoyFilter config to propagate to the client pod...")
-    time.sleep(10)
-    
-    logging.info("STEP 2: Starting retry test. This should take ~4-7 seconds...")
-    logging.info("Test logic: 1st request fails (503) -> wait 2s (from header) -> 2nd request fails (503) -> wait 2s -> 3rd request fails (503).")
-    logging.info("Total wait time should be ~4s, plus overhead.")
-    
-    start_time = time.time()
-    # We expect this command to fail, so check=False
-    run_command(
-        f"kubectl exec {CLIENT_APP_NAME} -n {TEST_NAMESPACE} -- curl -s -o /dev/null http://{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:8000/retry-test",
-        check=False
+    # Calculate the expected *minimum* time the test should take.
+    # (Attempts - 1) because the last attempt doesn't wait.
+    MIN_EXPECTED_TIME = RETRY_SECONDS * (ATTEMPTS - 1)
+    # Give a 3s buffer for network/curl overhead
+    MAX_EXPECTED_TIME = MIN_EXPECTED_TIME + 3 
+
+    try:
+        # STEP 1: Apply the test YAMLs
+        logging.info("STEP 1: Applying VirtualService and EnvoyFilter for retry test...")
+        apply_yaml_template(RETRY_VS_PATH)
+        apply_yaml_template(RETRY_EF_PATH)
+        
+        logging.info("Waiting 10s for EnvoyFilter to propagate...")
+        time.sleep(10)
+
+        # STEP 2: Run the test command
+        # We use 'time -p' for simple, parseable output (e.g., "real 4.02")
+        # We curl the fake host. The sidecar will intercept this.
+        logging.info(f"STEP 2: Curling fake host 'http://retry-test.local/test-retry'")
+        logging.info(f"This should fail, but take at least {MIN_EXPECTED_TIME}s...")
+        
+        # We expect this command to fail (non-zero exit code), so 'check=False'
+        # The 'time -p' output is sent to stderr, so we capture it.
+        # This is a common way to time a command in a script.
+        curl_cmd = (
+            "time -p curl -s -o /dev/null "
+            "-w '%{http_code}' " # We only want the http code as stdout
+            "http://retry-test.local/test-retry"
+        )
+        
+        # Note: 'time -p' output goes to stderr, curl output to stdout
+        output, stderr_output = run_command_with_stderr(curl_cmd, check=False)
+        
+        # STEP 3: Parse the 'time' output from stderr
+        logging.info(f"Raw 'time' output (from stderr):\n{stderr_output}")
+        
+        real_time = 0.0
+        match = re.search(r"real\s+([0-9\.]+)", stderr_output)
+        if match:
+            real_time = float(match.group(1))
+        
+        logging.info(f"Test completed. HTTP code: '{output}', Elapsed time: {real_time}s")
+
+        # STEP 4: Validate the results
+        if output == "503" and real_time >= MIN_EXPECTED_TIME and real_time < MAX_EXPECTED_TIME:
+            logging.info(f"SUCCESS: Test took {real_time}s (within {MIN_EXPECTED_TIME}-{MAX_EXPECTED_TIME}s range) and returned 503.")
+            logging.info("Retry-After header was correctly respected.")
+        else:
+            if output != "503":
+                logging.error(f"FAILURE: Expected HTTP 503, but got '{output}'")
+            if not (real_time >= MIN_EXPECTED_TIME and real_time < MAX_EXPECTED_TIME):
+                logging.error(f"FAILURE: Test time ({real_time}s) was outside expected range ({MIN_EXPECTED_TIME}-{MAX_EXPECTED_TIME}s).")
+            raise Exception("Retry-After test FAILED.")
+
+    finally:
+        # STEP 5: Cleanup
+        logging.info("Cleaning up retry test resources...")
+        run_command(f"kubectl delete -f {RETRY_VS_PATH}", check=False)
+        run_command(f"kubectl delete -f {RETRY_EF_PATH}", check=False)
+        
+    logging.info("Retry-After check PASSED.")
+
+# You will need a modified 'run_command' or similar utility
+# that can capture both stdout and stderr.
+def run_command_with_stderr(command, check=True, timeout=30):
+    """
+    A helper function to run a command and capture both stdout and stderr.
+    (This is an example, it might differ from your 'utils.run_command')
+    """
+    import subprocess
+    result = subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
-    end_time = time.time()
-    duration = end_time - start_time
+    if check and result.returncode != 0:
+        raise Exception(f"Command failed with error:\n{result.stderr}")
     
-    logging.info(f"Test complete in {duration:.2f} seconds.")
-    
-    # Check if the duration is within the expected window (4s wait + overhead)
-    if 5 <= duration <= 8:
-        logging.info(f"✅ Retry-After test PASSED. Duration ({duration:.2f}s) is within the expected range (5-8s).")
-    else:
-        logging.error(f"FAILURE: Retry-After test duration was outside the expected range. Got {duration:.2f}s")
-        raise Exception(f"Retry-After test FAILED. Duration: {duration:.2f}s")
-
-
+    return result.stdout.strip(), result.stderr.strip()
         
 # --- ADD NEW FUNCTION ---
 def check_egress_tls_origination():

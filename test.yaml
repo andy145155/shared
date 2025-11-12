@@ -73,190 +73,68 @@ data:
     apiVersion: networking.istio.io/v1alpha3
     kind: VirtualService
     metadata:
-      name: retry-test-vs
-      namespace: {TEST_NAMESPACE}
+      name: retry-after-test-vs
+      namespace: {{TEST_NAMESPACE}}
     spec:
       hosts:
-      - "test-target-app.{TEST_NAMESPACE}.svc.cluster.local"
+      - "retry-test.local" # A fake host just for this test
+      gateways:
+      - mesh # Apply to all sidecars in the mesh
       http:
-      - match:
+      - name: "retry-route" # We will patch this route name
+        match:
         - uri:
-            prefix: /retry-test # We will curl this path
-        fault: # Server-side: inject a 503 error
+            prefix: "/test-retry"
+        fault:
           abort:
-            httpStatus: 503
+            httpStatus: 503 # 1. Force a 503 to trigger the retry
             percentage:
-              value: 100
-        headers: # Server-side: add the retry-after header
+              value: 100.0
+        retries:
+          attempts: 3 # 2. Allow 3 total attempts
+          perTryTimeout: 1s
+          retryOn: "gateway-error,connect-failure,503"
+        headers:
           response:
             set:
-              "retry-after": "2" # Tell client to wait 2 seconds
+              "retry-after": "2" # 3. Tell the client to wait 2 seconds
         route:
         - destination:
-            host: "test-target-app.{TEST_NAMESPACE}.svc.cluster.local"
+            # Route to a fake host. It doesn't matter,
+            # the 'fault' will happen before the request is sent.
+            host: "blackhole.local"
             port:
-              number: 8000
-        retries: # Client-side: enable retries
-          attempts: 3
-          perTryTimeout: 3s
-          retryOn: "503,gateway-error,connect-failure"
-      - route: # Default route for other paths
-        - destination:
-            host: "test-target-app.{TEST_NAMESPACE}.svc.cluster.local"
-            port:
-              number: 8000
+              number: 80
 
   # --- ADD THIS NEW FILE ---
   retry-envoyfilter.yaml: |
     apiVersion: networking.istio.io/v1alpha3
     kind: EnvoyFilter
     metadata:
-      name: retry-after-filter
-      namespace: {TEST_NAMESPACE} # Must be in the same namespace as the client
+      name: retry-after-test-ef
+      namespace: {{TEST_NAMESPACE}}
     spec:
       workloadSelector:
         labels:
-          app: curl-client # Targets our test pod
+          app: af-toolkit # !!! IMPORTANT: Assumes this label is on your test pod
       configPatches:
       - applyTo: HTTP_ROUTE
         match:
           context: SIDECAR_OUTBOUND
           routeConfiguration:
             vhost:
-              # Matches the route to our test service
-              name: "test-target-app.{TEST_NAMESPACE}.svc.cluster.local:8000"
-        patch:
-          operation: MERGE
-          value:
-            retry_policy:
-              # This tells the retry policy to read the header
-              rate_limited_retry_back_off:
-                reset_headers:
-                - name: "retry-after"
-                  format: SECONDS
-                max_interval: "5s" # Max time to wait
-
-
-
-
-# Add this key to your ConfigMap
-  egress-se-google.yaml: |
-    apiVersion: networking.istio.io/v1alpha3
-    kind: ServiceEntry
-    metadata:
-      name: google-se
-      namespace: {TEST_NAMESPACE}
-    spec:
-      hosts:
-      - "www.google.com"
-      ports:
-      - number: 80
-        name: http
-        protocol: HTTP
-      - number: 443
-        name: https
-        protocol: HTTPS
-      resolution: DNS
-
-  # Add this key to your ConfigMap
-  egress-dr-vs-google.yaml: |
-    apiVersion: networking.istio.io/v1alpha3
-    kind: VirtualService
-    metadata:
-      name: google-vs
-      namespace: {TEST_NAMESPACE}
-    spec:
-      hosts:
-      - "www.google.com"
-      http:
-      - match:
-        - port: 80 # <-- Match plain HTTP requests
-        route:
-        - destination:
-            host: "www.google.com"
-            port:
-              number: 443 # <-- Reroute them to HTTPS port 443
-          weight: 100
-    ---
-    apiVersion: networking.istio.io/v1alpha3
-    kind: DestinationRule
-    metadata:
-      name: google-dr
-      namespace: {TEST_NAMESPACE}
-    spec:
-      host: "www.google.com"
-      trafficPolicy:
-        portLevelSettings:
-        - port:
-            number: 443
-          tls:
-            mode: SIMPLE # <-- Perform TLS Origination
-            sni: "www.google.com"
-
-# Add this key to your ConfigMap
-  retry-vs.yaml: |
-    apiVersion: networking.istio.io/v1alpha3
-    kind: VirtualService
-    metadata:
-      name: retry-test-vs
-      namespace: {TEST_NAMESPACE}
-    spec:
-      hosts:
-      - "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local"
-      http:
-      - match:
-        - uri:
-            prefix: /retry-test
-        fault:
-          abort:
-            httpStatus: 503
-            percentage:
-              value: 100
-        headers:
-          response:
-            set:
-              "retry-after": "2" # Tell client to wait 2 seconds
-        route:
-        - destination:
-            host: "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local"
-            port:
-              number: 8000
-          retries:
-            attempts: 3 # 1 initial + 2 retries
-            perTryTimeout: 1s
-            retryOn: "5xx"
-      - route:
-        - destination:
-            host: "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local"
-            port:
-              number: 8000
-
-  # Add this key to your ConfigMap
-  retry-envoyfilter.yaml: |
-    apiVersion: networking.istio.io/v1alpha3
-    kind: EnvoyFilter
-    metadata:
-      name: retry-after-filter
-      namespace: {TEST_NAMESPACE} # Must be in same namespace as pod
-    spec:
-      workloadSelector:
-        labels:
-          app: {CLIENT_APP_NAME} # <-- FIXED: Selects your client pod
-      configPatches:
-      - applyTo: HTTP_ROUTE
-        match:
-          context: SIDECAR_OUTBOUND
-          routeConfiguration:
-            vhost:
-              name: "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:8000"
+              name: "retry-test.local:80" # Must match the VS host/port
               route:
-                name: retry-test-vs # Matches the VS route
+                name: "retry-route" # Must match the VS route name
         patch:
           operation: MERGE
           value:
             retry_policy:
+              # This is the "magic" that enables respecting the header
               rate_limited_retry_back_off:
                 reset_headers:
                 - name: "retry-after"
                   format: SECONDS
-                max_interval: "5s" # Max wait time
+              # Set a max, so a bad server (e.g., "retry-after: 300")
+              # doesn't stall the test for 5 minutes.
+              max_interval: "5s"
