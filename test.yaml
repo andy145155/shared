@@ -144,3 +144,105 @@ data:
                 - name: "retry-after"
                   format: SECONDS
               max_interval: "5s" # A safety cap
+
+
+
+
+# This is the complete, correct retry-template.yaml
+# It contains THREE separate resources.
+
+# RESOURCE 1: VIRTUAL SERVICE (for CLIENT)
+# This ONLY tells the client how to retry.
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: {RETRY_VIRTUAL_SERVICE_NAME}
+  namespace: {TEST_NAMESPACE}
+spec:
+  hosts:
+  - {TARGET_APP_NAME}
+  http:
+  - match:
+    - uri:
+        prefix: "/test-retry"
+      method:
+        exact: GET
+    retries:
+      attempts: {RETRY_ATTEMPTS}
+      perTryTimeout: 1s
+      retryOn: "gateway-error,connect-failure,503"
+    route:
+    - destination:
+        host: {TARGET_APP_NAME}
+        port:
+          number: 80
+---
+# RESOURCE 2: CLIENT ENVOYFILTER
+# This patches the CLIENT's outbound proxy to obey the 'retry-after' header.
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: {RETRY_ENVOY_FILTER}
+  namespace: {TEST_NAMESPACE}
+spec:
+  workloadSelector:
+    labels:
+      app: {CLIENT_APP_NAME} # <-- Selects the CLIENT
+  configPatches:
+  - applyTo: HTTP_ROUTE
+    match:
+      context: SIDECAR_OUTBOUND # <-- Applies to CLIENT's outbound traffic
+      routeConfiguration:
+        vhost:
+          # This is your fix, which is correct
+          name: "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:80"
+          route:
+            name: "retry-route"
+    patch:
+      operation: MERGE
+      value:
+        route:
+          retry_policy:
+            rate_limited_retry_back_off:
+              reset_headers:
+              - name: "retry-after"
+                format: ENVOY_RATELIMIT_RESET
+            max_interval: "5s" # You can adjust this
+---
+# RESOURCE 3: SERVER ENVOYFILTER
+# This patches the SERVER's inbound proxy to send the 503 + 'retry-after'
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: server-fault-injector
+  namespace: {TEST_NAMESPACE}
+spec:
+  workloadSelector:
+    labels:
+      app: {TARGET_APP_NAME} # <-- Selects the SERVER
+  configPatches:
+  - applyTo: HTTP_FILTER
+    match:
+      context: SIDECAR_INBOUND # <-- Applies to SERVER's inbound traffic
+      listener:
+        filterChain:
+          filter:
+            name: "envoy.filters.network.http_connection_manager"
+    patch:
+      operation: INSERT_BEFORE
+      value:
+        name: envoy.filters.http.fault
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault
+          abort:
+            httpStatus: 503
+            percentage:
+              numerator: 100
+              denominator: HUNDRED
+          headers:
+            response:
+              set:
+              - header:
+                  key: "retry-after"
+                  value: "{RETRY_SECONDS}"
+                appendAction: OVERWRITE_IF_EXISTS_OR_ADD
