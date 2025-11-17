@@ -176,7 +176,6 @@ spec:
         host: {TARGET_APP_NAME}
         port:
           number: 80
----
 # RESOURCE 2: CLIENT ENVOYFILTER
 # This patches the CLIENT's outbound proxy to obey the 'retry-after' header.
 apiVersion: networking.istio.io/v1alpha3
@@ -194,7 +193,6 @@ spec:
       context: SIDECAR_OUTBOUND # <-- Applies to CLIENT's outbound traffic
       routeConfiguration:
         vhost:
-          # This is your fix, which is correct
           name: "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:80"
           route:
             name: "retry-route"
@@ -207,9 +205,9 @@ spec:
               reset_headers:
               - name: "retry-after"
                 format: ENVOY_RATELIMIT_RESET
-            max_interval: "5s" # You can adjust this
+            max_interval: "5s"
 ---
-# RESOURCE 3: SERVER ENVOYFILTER
+# RESOURCE 3: SERVER LUA FILTER (This is the new, correct solution)
 # This patches the SERVER's inbound proxy to send the 503 + 'retry-after'
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
@@ -229,20 +227,21 @@ spec:
           filter:
             name: "envoy.filters.network.http_connection_manager"
     patch:
-      operation: INSERT_BEFORE
+      operation: INSERT_BEFORE # <-- Inserts this Lua filter before the router
       value:
-        name: envoy.filters.http.fault
+        name: envoy.filters.http.lua
         typed_config:
-          "@type": type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault
-          abort:
-            httpStatus: 503
-            percentage:
-              numerator: 100
-              denominator: HUNDRED
-          headers:
-            response:
-              set:
-              - header:
-                  key: "retry-after"
-                  value: "{RETRY_SECONDS}"
-                appendAction: OVERWRITE_IF_EXISTS_OR_ADD
+          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+          inline_code: |
+            function envoy_on_request(request_handle)
+              -- This single command does both:
+              -- 1. Aborts the request
+              -- 2. Sends the 503 status AND the retry-after header
+              request_handle:respond(
+                {
+                  [":status"] = "503",
+                  ["retry-after"] = "{RETRY_SECONDS}"
+                },
+                "service unavailable" -- This is the response body
+              )
+            end
