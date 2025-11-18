@@ -1,0 +1,42 @@
+📝 Summary
+This PR introduces the initial foundation for an automated Istio release verification suite. The goal is to replace manual validation steps with a robust Python script that ensures the Istio control plane is healthy and configurations are valid before proceeding with functional testing.
+
+This is Part 1 of the verification series, focusing on:
+
+Infrastructure (Helper functions, command execution).
+
+Smart YAML Templating (Handling both Standard and Envoy/Lua templates).
+
+Control Plane Health Checks.
+
+Configuration Analysis.
+
+🛠 Key Changes
+1. Robust Templating Engine (apply_yaml_template)
+Implemented a flexible templating function to handle a specific edge case with EnvoyFilters containing Lua scripts.
+
+Standard Mode: Uses Python’s .format() for standard YAML injection (e.g., VirtualServices).
+
+Safe Mode (use_safe_template=True): Uses string.Template ($VAR syntax) for files containing Lua code or complex block strings. This prevents conflicts between Python's {} placeholders and Lua's function syntax function() { ... }.
+
+Dynamic Arguments: Utilizes **kwargs to allow passing dynamic variables to templates without modifying the function signature.
+
+2. Control Plane Validation (check_control_plane)
+Verifies istiod deployment availability based on the ISTIO_VERSION environment variable.
+
+Checks proxy synchronization status (istioctl proxy-status), ensuring no proxies remain in a STALE state.
+
+3. Configuration Analysis (check_istio_configurations)
+Wraps istioctl analyze to detect potential configuration issues across all namespaces (suppressing standard noise).
+
+4. Utilities
+Added a run_command wrapper with structured logging (stdout/stderr) and error handling.
+
+🔜 Future Work (Part 2 & 3)
+Subsequent PRs will build upon this foundation to add:
+
+Data Plane Verification: Deploying sample apps (Client/Target).
+
+Traffic Testing: Verifying connectivity, retries, and timeouts.
+
+Gateway Verification: Ingress/Egress checks.
