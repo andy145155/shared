@@ -6,8 +6,15 @@ import time
 import logging
 import shlex
 import os
-import json
-
+import"""
+    Applies or Deletes a YAML file using kubectl.
+    
+    :param template_path: Path to the YAML file
+    :param is_delete: If True, runs 'kubectl delete', else 'kubectl apply'
+    :param check: If True, raises exception on failure
+    :param use_safe_template: If True, uses string.Template ($VAR). If False, uses .format ({VAR}).
+    :param **template_vars: Dynamic arguments to fill the template.
+    """
 # --- Configuration (from Environment Variables) ---
 TEST_NAMESPACE = os.environ.get("TEST_NAMESPACE", "istio-verify-test")
 INGRESS_HOST = os.environ.get("INGRESS_HOST", "verify-test.example.com")
