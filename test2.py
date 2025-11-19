@@ -170,6 +170,49 @@ def verify_connectivity(ingress_host, cluster_ip, path="/v1/template/ping"):
     logging.error("❌ Connectivity check failed after all retries.")
     return False
 
+def verify_ingress_isolation(cluster_ip):
+    """
+    NEGATIVE TEST: Sends traffic to the Ingress IP using a BOGUS hostname.
+    
+    Goal: Verify that Istio BLOCKS traffic that doesn't match our VirtualService.
+    Expectation: HTTP 404 (Not Found).
+    If we get 200 OK, it means our Gateway is too open (security risk).
+    """
+    fake_host = "unauthorized-user.com"
+    path = "/v1/template/ping"
+    
+    # We map the FAKE host to the REAL ClusterIP
+    # This simulates someone pointing their DNS to our LB illegally
+    curl_cmd = (
+        f"curl -k -s -o /dev/null -w '%{{http_code}}' "
+        f"--resolve {fake_host}:443:{cluster_ip} "
+        f"https://{fake_host}{path}"
+    )
+
+    logging.info(f"🔒 Starting Negative Test (Isolation Check)...")
+    logging.info(f"Attempting to access Gateway using bogus host: {fake_host}")
+
+    # We don't need a long retry loop here because we assume the Gateway 
+    # is already up (since the Positive Test passed).
+    # We just check once or twice.
+    
+    for attempt in range(1, 4):
+        stdout, _ = run_command(curl_cmd, check=False)
+        status_code = stdout.strip()
+
+        if status_code == "404":
+            logging.info(f"✅ Success! Request was correctly blocked with 404.")
+            return True
+        elif status_code == "200":
+            logging.error(f"❌ SECURITY FAILURE! The Gateway accepted traffic for {fake_host} (Got 200 OK). Check your VirtualService hosts!")
+            return False
+        else:
+            logging.warning(f"Attempt {attempt}: Got status {status_code}. Waiting for 404...")
+            time.sleep(2)
+
+    logging.error(f"❌ Isolation Check Failed. Expected 404, got {status_code}.")
+    return False
+
 # --- Main Logic ---
 
 def check_ingress_gateway():
@@ -205,3 +248,96 @@ def check_ingress_gateway():
 
 if __name__ == "__main__":
     check_ingress_gateway()
+
+
+import ssl
+import socket
+import datetime
+
+def verify_tls_cert(hostname, connect_ip):
+    """
+    SSL/TLS VERIFICATION: 
+    Connects to the ingress IP while simulating SNI for 'hostname'.
+    Verifies:
+    1. The handshake succeeds (Cert matches Hostname).
+    2. The certificate is not expired.
+    3. (Optional) The Issuer is correct.
+    """
+    context = ssl.create_default_context()
+    
+    # If using self-signed certs in test, you might need to disable verification:
+    # context.check_hostname = False
+    # context.verify_mode = ssl.CERT_NONE
+    # BUT: For a true verification test, you want defaults (Strict) if possible,
+    # or at least verify the dates manually if the CA isn't trusted in the container.
+
+    logging.info(f"🔒 Checking TLS Certificate for {hostname} (via {connect_ip})...")
+
+    try:
+        # 1. Create a TCP connection to the specific ClusterIP (Hairpin bypass)
+        sock = socket.create_connection((connect_ip, 443), timeout=5)
+
+        # 2. Wrap the socket with SSL, forcing the SNI hostname
+        with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+            
+            # 3. Retrieve the Certificate
+            cert = ssock.getpeercert()
+            
+            # 4. Verify Expiration
+            # Ideally, we use the 'notAfter' field.
+            # Python returns it as 'Nov 20 12:00:00 2025 GMT'
+            not_after_str = cert['notAfter']
+            not_after_date = datetime.datetime.strptime(not_after_str, '%b %d %H:%M:%S %Y %Z')
+            
+            # Simple logic: Must be in the future
+            if not_after_date < datetime.datetime.utcnow():
+                logging.error(f"❌ CERT EXPIRED! Valid until: {not_after_str}")
+                return False
+            
+            # 5. (Optional) Verify Issuer if you want to be strict
+            # issuer = dict(x[0] for x in cert['issuer'])
+            # if 'Let\'s Encrypt' not in issuer.get('organizationName', ''):
+            #     logging.warning("⚠️ Cert not issued by expected CA")
+
+            logging.info(f"✅ TLS Certificate is valid. Expires: {not_after_str}")
+            return True
+
+    except ssl.SSLCertVerificationError as e:
+        logging.error(f"❌ TLS Verification Failed: {e}")
+        # This usually means the Cert's CN/SAN doesn't match the Hostname
+        return False
+    except Exception as e:
+        logging.error(f"❌ SSL Connection Error: {e}")
+        return False
+        
+
+def check_ingress_gateway():
+    logging.info("--- 5. Checking Ingress Gateway ---")
+
+    # 1. Get Infrastructure
+    try:
+        real_ingress_host, internal_ip = get_ingress_info()
+    except Exception:
+        sys.exit(1)
+
+    # 2. Apply Config
+    apply_yaml_template(..., INGRESS_HOST=real_ingress_host)
+
+    # 3. TLS Certificate Check (Layer 4/5 Security)
+    # Check this FIRST before doing HTTP requests
+    logging.info(">>> Running TLS Validity Test...")
+    if not verify_tls_cert(real_ingress_host, internal_ip):
+        logging.error("TLS Certificate Check Failed.")
+        sys.exit(1)
+
+    # 4. Positive Connectivity (Layer 7 Functionality)
+    logging.info(">>> Running Positive Connectivity Test...")
+    if not verify_connectivity(real_ingress_host, internal_ip):
+        sys.exit(1)
+
+    # 5. Negative Isolation (Layer 7 Security)
+    logging.info(">>> Running Negative Isolation Test...")
+    if not verify_ingress_isolation(internal_ip):
+        sys.exit(1)
+
+    logging.info("🎉 All Ingress Checks Passed (TLS + Connectivity + Isolation).")
