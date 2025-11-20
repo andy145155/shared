@@ -1,52 +1,34 @@
 import logging
-import subprocess
 import time
-import shlex
 import json
+import subprocess
 
-# Create a logger for this module
+# --- IMPORT YOUR EXISTING UTILITY ---
+# Adjust the import path 'lib.utils' based on your folder structure.
+# Based on your screenshot, it looks like 'lib.utils' or '..lib.utils'
+try:
+    from lib.utils import run_command
+except ImportError:
+    # Fallback or helpful error if path is slightly different in your hierarchy
+    raise ImportError("Could not import run_command from lib.utils. Please check your directory structure.")
+
 logger = logging.getLogger(__name__)
 
 class IstioMTLSVerifier:
     def __init__(self, namespace, target_svc, source_sidecar, source_no_sidecar):
-        """
-        Initialize the Verifier with environment details.
-        
-        :param namespace: The K8s namespace where tests run.
-        :param target_svc: The name of the service we are trying to reach.
-        :param source_sidecar: The pod name that HAS a sidecar.
-        :param source_no_sidecar: The pod name that DOES NOT have a sidecar.
-        """
         self.ns = namespace
         self.target_svc = target_svc
         self.source_sidecar = source_sidecar
         self.source_no_sidecar = source_no_sidecar
         
-        # Construct the internal cluster URL
+        # The endpoint we are testing against
         self.target_url = f"http://{self.target_svc}.{self.ns}.svc.cluster.local:80/v1/template/ping"
-
-    def _run_command(self, command, check=True):
-        """Internal helper to run shell commands."""
-        try:
-            args = shlex.split(command)
-            result = subprocess.run(
-                args,
-                capture_output=True,
-                text=True,
-                check=check
-            )
-            return result
-        except subprocess.CalledProcessError as e:
-            # We log the stderr here for easier debugging
-            logger.debug(f"Command failed: {command}")
-            logger.debug(f"Error output: {e.stderr}")
-            raise e
 
     def _check_connection(self, source_pod, expect_success, retries=3, delay=2):
         """
-        Runs curl from a source pod to the target.
-        Handles retries and positive/negative assertions.
+        Runs curl from a source pod to the target using your existing run_command.
         """
+        # We use -v to help debug, but rely on exit code for success/fail
         cmd = (
             f"kubectl exec {source_pod} -n {self.ns} -- "
             f"curl -v --connect-timeout 5 {self.target_url}"
@@ -55,60 +37,67 @@ class IstioMTLSVerifier:
         for attempt in range(1, retries + 1):
             try:
                 logger.info(f"Attempt {attempt}/{retries}: Connection from {source_pod}...")
-                self._run_command(cmd, check=True)
+                
+                # Call your utility. check=True will raise CalledProcessError on failure.
+                run_command(cmd, check=True)
 
-                # If we are here, curl succeeded (Exit Code 0)
+                # CASE 1: Curl Succeeded (No Exception raised)
                 if expect_success:
                     logger.info("✅ Connection succeeded as expected.")
                     return
                 else:
+                    # We expected failure, but it worked -> FAIL
                     raise Exception(f"❌ SECURITY FAIL: Traffic from {source_pod} was ALLOWED (should be blocked).")
 
             except subprocess.CalledProcessError as e:
-                # If we are here, curl failed (Non-Zero Exit Code)
+                # CASE 2: Curl Failed (Exception raised)
                 if not expect_success:
-                    logger.info(f"✅ Connection blocked as expected. (Curl exit code: {e.returncode})")
+                    logger.info(f"✅ Connection blocked as expected. (Exit Code: {e.returncode})")
                     return
                 else:
-                    logger.warning(f"Connection failed (Attempt {attempt}). Error: {e.stderr}")
+                    # We expected success, but it failed -> Retry or Fail
+                    logger.warning(f"Connection failed (Attempt {attempt}).")
             
             if attempt < retries:
                 time.sleep(delay)
 
-        # Final decision after retries exhausted
+        # If we exhaust retries without returning
         if expect_success:
             raise Exception(f"❌ Connectivity Test FAILED: Could not connect from {source_pod}.")
         
-        # If expect_success is False, we technically passed if we never returned inside the loop?
-        # No, if we are here and expect_success is False, it means we actually caught an exception every time?
-        # Actually, in the negative case:
-        #   - If curl succeeds, we raise Exception -> Test Fails.
-        #   - If curl fails, we return -> Test Passes.
-        # So falling through here is only possible for the Positive case failure.
+        # If expect_success is False, and we are here, it means the loop finished.
+        # The loop only finishes if we kept catching CalledProcessError (success for negative test)
+        # OR if we raised the "SECURITY FAIL" exception (which bubbles up).
         pass
 
     def _verify_envoy_config(self):
         """
-        Best Practice: Verifies mTLS is configured in Envoy via localhost:15000
+        Verifies mTLS is configured in Envoy via localhost:15000.
         """
         logger.info(f"🔍 Verifying Envoy mTLS configuration on {self.source_sidecar}...")
         
+        # Command to get config dump from Envoy Admin API
         cmd = f"kubectl exec {self.source_sidecar} -n {self.ns} -- curl -s -f localhost:15000/config_dump"
         
         try:
-            result = self._run_command(cmd, check=True)
-            config_dump = json.loads(result.stdout)
+            # run_command returns (stdout, stderr)
+            stdout, _ = run_command(cmd, check=True)
+            
+            config_dump = json.loads(stdout)
             
             target_cluster_name = f"outbound|80||{self.target_svc}.{self.ns}.svc.cluster.local"
             found_mtls = False
 
-            # Parse deep JSON structure
+            # Deep JSON parsing to find the Transport Socket
             for config in config_dump.get('configs', []):
+                # Check type safely (handle different Envoy versions/names)
                 if 'ClustersConfigDump' in config.get('@type', ''):
                     for cluster in config.get('dynamic_active_clusters', []):
                         cluster_detail = cluster.get('cluster', {})
                         if cluster_detail.get('name') == target_cluster_name:
                             transport_socket = cluster_detail.get('transport_socket', {})
+                            
+                            # Look for TLS definition
                             if "tls" in transport_socket.get('name', ''):
                                 found_mtls = True
                                 logger.info(f"✅ Envoy Config Verified: Transport Socket found for {self.target_svc}")
