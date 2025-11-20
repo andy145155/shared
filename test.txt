@@ -1,42 +1,61 @@
-📝 Summary
-This PR introduces the initial foundation for an automated Istio release verification suite. The goal is to replace manual validation steps with a robust Python script that ensures the Istio control plane is healthy and configurations are valid before proceeding with functional testing.
+Description
 
-This is Part 1 of the verification series, focusing on:
+This PR introduces a robust, automated test suite to verify that Istio STRICT mTLS mode is correctly enforced across the cluster. It ensures that traffic between sidecars is successful while plaintext traffic from non-sidecar workloads is correctly blocked.
 
-Infrastructure (Helper functions, command execution).
+Additionally, this PR refactors the existing test runner codebase to improve modularity, performance, and error handling by establishing a clean separation of concerns between library code and test suites.
 
-Smart YAML Templating (Handling both Standard and Envoy/Lua templates).
+Key Changes
 
-Control Plane Health Checks.
+📂 Project Structure
 
-Configuration Analysis.
+New Library Directory (/lib): Centralized shared logic by moving configuration and utility helpers into a dedicated lib/ folder (lib/config.py, lib/utils.py).
 
-🛠 Key Changes
-1. Robust Templating Engine (apply_yaml_template)
-Implemented a flexible templating function to handle a specific edge case with EnvoyFilters containing Lua scripts.
+Test Suite Isolation (/tests): Relocated verification scripts (including the new mTLS tests) to a /tests directory to separate test logic from the main execution entry point.
 
-Standard Mode: Uses Python’s .format() for standard YAML injection (e.g., VirtualServices).
+🔒 Istio mTLS Verification (tests/verify_istio_mtls.py)
 
-Safe Mode (use_safe_template=True): Uses string.Template ($VAR syntax) for files containing Lua code or complex block strings. This prevents conflicts between Python's {} placeholders and Lua's function syntax function() { ... }.
+New Verification Logic: Added a dedicated module to run black-box connectivity tests.
 
-Dynamic Arguments: Utilizes **kwargs to allow passing dynamic variables to templates without modifying the function signature.
+Positive Test: Verifies Sidecar -> Sidecar connectivity (should SUCCEED).
 
-2. Control Plane Validation (check_control_plane)
-Verifies istiod deployment availability based on the ISTIO_VERSION environment variable.
+Negative Test: Verifies No-Sidecar -> Sidecar connectivity (should be BLOCKED).
 
-Checks proxy synchronization status (istioctl proxy-status), ensuring no proxies remain in a STALE state.
+Robustness: Implemented retry logic for curl commands to handle eventual consistency in mesh configuration propagation.
 
-3. Configuration Analysis (check_istio_configurations)
-Wraps istioctl analyze to detect potential configuration issues across all namespaces (suppressing standard noise).
+Assertion Logic: Switched from string matching on stdout to strict process exit-code assertions (checking for curl exit code 0 vs non-zero).
 
-4. Utilities
-Added a run_command wrapper with structured logging (stdout/stderr) and error handling.
+⚡ Performance & Logic Improvements
 
-🔜 Future Work (Part 2 & 3)
-Subsequent PRs will build upon this foundation to add:
+Parallelized Startup: Refactored setup_test_apps to wait for all pods in the namespace to be ready simultaneously, replacing sequential waits. This significantly reduces test execution time.
 
-Data Plane Verification: Deploying sample apps (Client/Target).
+Client Validation: Added logic to verify istio-proxy injection on the client pod, ensuring the source of traffic is valid.
 
-Traffic Testing: Verifying connectivity, retries, and timeouts.
+Template Safety: Updated apply_yaml_template to catch and report ValueError (invalid $ syntax) in addition to KeyError.
 
-Gateway Verification: Ingress/Egress checks.
+Namespace Cleanup: Updated cleanup_test_resources to perform a "nuclear" cleanup using kubectl delete namespace with foreground cascading, ensuring no orphaned resources remain.
+
+⚙️ Configuration
+
+YAML Update: Updated the no-sidecar-curl pod template to explicitly include sidecar.istio.io/inject: "false", preventing accidental auto-injection in the test namespace.
+
+How to Verify
+
+Run the automation pipeline.
+
+Observe logs for verify_istio_mtls:
+
+Confirm "Test 1" (Sidecar -> Sidecar) passes.
+
+Confirm "Test 3" (No-Sidecar -> Sidecar) passes by successfully blocking the connection.
+
+Verify that the test namespace is automatically deleted after execution (regardless of pass/fail).
+
+Checklist
+
+[x] Project structure reorganized: config and utils moved to /lib; tests moved to /tests.
+
+[x] apply_yaml_template handles template syntax errors (ValueError).
+
+[x] Negative tests confirm that plaintext traffic is rejected.
+
+[x] Cleanup hooks ensure no resources are left dangling.
