@@ -1,61 +1,29 @@
-Description
+This PR establishes the Kubernetes infrastructure required to automate Istio release verification. It introduces a CronJob, a ConfigMap containing test fixtures, and the necessary RBAC permissions to allow the test runner to manage ephemeral environments.
 
-This PR introduces a robust, automated test suite to verify that Istio STRICT mTLS mode is correctly enforced across the cluster. It ensures that traffic between sidecars is successful while plaintext traffic from non-sidecar workloads is correctly blocked.
+This change enables the platform to run automated verification suites (e.g., post-upgrade or on a schedule) by providing the necessary runtime environment and access controls.
 
-Additionally, this PR refactors the existing test runner codebase to improve modularity, performance, and error handling by establishing a clean separation of concerns between library code and test suites.
+🛠 Infrastructure Changes
+1. CronJob (release-verification-istio)
+Purpose: Acts as the runner for the verification suite.
 
-Key Changes
+Schedule: Configured to run @monthly, but set to suspend: true by default to allow for controlled, manual triggering or pipeline-based execution.
 
-📂 Project Structure
+Configuration: Mounts the test manifests from the ConfigMap into the container at /etc/istio-verify-config.
 
-New Library Directory (/lib): Centralized shared logic by moving configuration and utility helpers into a dedicated lib/ folder (lib/config.py, lib/utils.py).
+2. ConfigMap (release-verification-istio-cm)
+Stores the Kubernetes manifests used by the test runner to spin up temporary workloads. The data includes:
 
-Test Suite Isolation (/tests): Relocated verification scripts (including the new mTLS tests) to a /tests directory to separate test logic from the main execution entry point.
+test-apps.yaml: Templates for the Target Service, Deployment, and Client Sidecar pod.
 
-🔒 Istio mTLS Verification (tests/verify_istio_mtls.py)
+no-sidecar-verify-client.yaml: Template for the negative-test client (explicitly configured with sidecar.istio.io/inject: "false").
 
-New Verification Logic: Added a dedicated module to run black-box connectivity tests.
+3. RBAC Permissions (ClusterRole & Binding)
+The test runner requires elevated permissions to manage the lifecycle of ephemeral test environments.
 
-Positive Test: Verifies Sidecar -> Sidecar connectivity (should SUCCEED).
+ServiceAccount: Binds the CronJob to a dedicated identity.
 
-Negative Test: Verifies No-Sidecar -> Sidecar connectivity (should be BLOCKED).
+ClusterRole Permissions: Grants create, get, list, watch, delete, and patch verbs on:
 
-Robustness: Implemented retry logic for curl commands to handle eventual consistency in mesh configuration propagation.
+namespaces (to create/destroy test-ns-xxx)
 
-Assertion Logic: Switched from string matching on stdout to strict process exit-code assertions (checking for curl exit code 0 vs non-zero).
-
-⚡ Performance & Logic Improvements
-
-Parallelized Startup: Refactored setup_test_apps to wait for all pods in the namespace to be ready simultaneously, replacing sequential waits. This significantly reduces test execution time.
-
-Client Validation: Added logic to verify istio-proxy injection on the client pod, ensuring the source of traffic is valid.
-
-Template Safety: Updated apply_yaml_template to catch and report ValueError (invalid $ syntax) in addition to KeyError.
-
-Namespace Cleanup: Updated cleanup_test_resources to perform a "nuclear" cleanup using kubectl delete namespace with foreground cascading, ensuring no orphaned resources remain.
-
-⚙️ Configuration
-
-YAML Update: Updated the no-sidecar-curl pod template to explicitly include sidecar.istio.io/inject: "false", preventing accidental auto-injection in the test namespace.
-
-How to Verify
-
-Run the automation pipeline.
-
-Observe logs for verify_istio_mtls:
-
-Confirm "Test 1" (Sidecar -> Sidecar) passes.
-
-Confirm "Test 3" (No-Sidecar -> Sidecar) passes by successfully blocking the connection.
-
-Verify that the test namespace is automatically deleted after execution (regardless of pass/fail).
-
-Checklist
-
-[x] Project structure reorganized: config and utils moved to /lib; tests moved to /tests.
-
-[x] apply_yaml_template handles template syntax errors (ValueError).
-
-[x] Negative tests confirm that plaintext traffic is rejected.
-
-[x] Cleanup hooks ensure no resources are left dangling.
+pods, deployments, services, configmaps, secrets, serviceaccounts (to deploy test apps within the ephemeral namespace).
