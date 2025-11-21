@@ -1,108 +1,182 @@
 import logging
+import sys
+import subprocess
 import time
 import json
-import subprocess
+import shlex
+from string import Template
 
-# 1. Import your Configuration
-import config  
+# --- Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# 2. Import your Utility
-try:
-    from lib.utils import run_command
-except ImportError:
-    raise ImportError("Could not import 'run_command' from 'lib.utils'")
-
-logger = logging.getLogger(__name__)
+# Constants (Can be moved to config file)
+ISTIO_NAMESPACE = "istio-system"
+INGRESS_SVC_NAME = "istio-ingressgateway"
+TEST_NAMESPACE = "test-automation-ns"
+TEST_GATEWAY_NAME = "test-gateway"
+TARGET_APP_NAME = "test-app" # Assumes this app is already deployed
 
 # --- Helper Functions ---
 
-def check_connection(source_pod, expect_success, retries=3, delay=2):
+def run_command(command, check=True, timeout=30, stdin_data=None):
     """
-    Checks connectivity from source_pod to the global TARGET_URL.
-    No need to pass namespace or url; we get them from config.
+    Executes a shell command and returns stdout/stderr.
+    Handles stdin for piping YAML directly to kubectl.
     """
-    # Use variables from config directly
-    cmd = (
-        f"kubectl exec {source_pod} -n {config.TEST_NAMESPACE} -- "
-        f"curl -v --connect-timeout 5 {config.TARGET_URL}"
-    )
+    try:
+        result = subprocess.run(
+            shlex.split(command),
+            check=check,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            input=stdin_data
+        )
+        return result.stdout.strip(), result.stderr.strip()
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Command failed: {command}")
+        if e.stderr: logging.error(f"STDERR: {e.stderr}")
+        if check: raise
+        return e.stdout, e.stderr
+    except Exception as e:
+        logging.error(f"Execution error: {e}")
+        if check: raise
+        return "", str(e)
 
-    for attempt in range(1, retries + 1):
-        try:
-            logger.info(f"Attempt {attempt}/{retries}: Connection from {source_pod}...")
-            
-            run_command(cmd, check=True)
-
-            if expect_success:
-                logger.info("✅ Connection succeeded as expected.")
-                return
-            else:
-                raise Exception(f"❌ SECURITY FAIL: Traffic from {source_pod} was ALLOWED.")
-
-        except subprocess.CalledProcessError as e:
-            if not expect_success:
-                logger.info(f"✅ Connection blocked as expected. (Code: {e.returncode})")
-                return
-            else:
-                logger.warning(f"Connection failed (Attempt {attempt}).")
-        
-        if attempt < retries:
-            time.sleep(delay)
-
-    if expect_success:
-        raise Exception(f"❌ Connectivity Test FAILED: Could not connect from {source_pod}.")
-
-def verify_envoy_config():
+def get_ingress_info_cli(namespace, service_name, timeout=60):
     """
-    Verifies Envoy config on the sidecar pod defined in config.
+    Fetches External Hostname and Internal ClusterIP using kubectl JSON output.
+    Retries until the LoadBalancer hostname is assigned by the Cloud Provider.
     """
-    source_pod = config.CLIENT_SIDECAR_NAME
-    target_svc = config.TARGET_APP_NAME
-    namespace = config.TEST_NAMESPACE
-
-    logger.info(f"🔍 Verifying Envoy mTLS configuration on {source_pod}...")
+    logging.info(f"🔍 Querying {service_name} in {namespace} (CLI JSON mode)...")
     
-    cmd = f"kubectl exec {source_pod} -n {namespace} -- curl -s -f localhost:15000/config_dump"
+    cmd = f"kubectl get svc {service_name} -n {namespace} -o json"
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        try:
+            stdout, _ = run_command(cmd, check=False)
+            if not stdout:
+                time.sleep(2)
+                continue
+
+            # Parse JSON (Safer than text parsing)
+            svc_data = json.loads(stdout)
+            
+            # 1. Get ClusterIP
+            cluster_ip = svc_data.get('spec', {}).get('clusterIP')
+
+            # 2. Get Hostname
+            status = svc_data.get('status', {}).get('loadBalancer', {}).get('ingress', [])
+            
+            if status and 'hostname' in status[0]:
+                hostname = status[0]['hostname']
+                logging.info(f"✅ Found Infrastructure - Host: {hostname}, IP: {cluster_ip}")
+                return hostname, cluster_ip
+            
+            logging.info("Waiting for Cloud LoadBalancer assignment...")
+            
+        except json.JSONDecodeError:
+            logging.warning("Failed to parse kubectl output.")
+        except Exception as e:
+            logging.warning(f"Retry: {e}")
+
+        time.sleep(5)
+
+    raise Exception(f"Timed out waiting for {service_name} LoadBalancer.")
+
+def apply_yaml_template(template_path, **vars):
+    """
+    Reads YAML, substitutes $VARs, and applies via kubectl stdin.
+    Atomic: No temp files created.
+    """
+    logging.info(f"📄 Rendering and Applying {template_path}...")
     
     try:
-        stdout, _ = run_command(cmd, check=True)
-        config_dump = json.loads(stdout)
+        with open(template_path, "r") as f:
+            content = f.read()
         
-        target_cluster_name = f"outbound|80||{target_svc}.{namespace}.svc.cluster.local"
-        found_mtls = False
+        # Substitute variables
+        rendered_yaml = Template(content).substitute(vars)
+        
+        # Apply directly via pipe
+        run_command("kubectl apply -f -", stdin_data=rendered_yaml)
+        logging.info("Gateway resources applied successfully.")
+        
+    except KeyError as e:
+        logging.error(f"Template Error: Missing variable ${e.args[0]}")
+        sys.exit(1)
+    except Exception as e:
+        logging.error(f"Failed to apply YAML: {e}")
+        sys.exit(1)
 
-        for cfg in config_dump.get('configs', []):
-            if 'ClustersConfigDump' in cfg.get('@type', ''):
-                for cluster in cfg.get('dynamic_active_clusters', []):
-                    if cluster.get('cluster', {}).get('name') == target_cluster_name:
-                        socket = cluster.get('cluster', {}).get('transport_socket', {})
-                        if "tls" in socket.get('name', ''):
-                            found_mtls = True
-                            logger.info(f"✅ Envoy Config Verified for {target_svc}")
-                        break
+def verify_connectivity(ingress_host, cluster_ip):
+    """
+    Verifies ingress flow using curl --resolve.
+    Maps the External Hostname to the Internal ClusterIP to bypass Hairpin NAT.
+    """
+    target_url = f"https://{ingress_host}/v1/template/ping"
+    
+    # --resolve forces curl to send the correct SNI/Host header but connect to the internal IP
+    curl_cmd = (
+        f"curl -k -s -o /dev/null -w '%{{http_code}}' "
+        f"--resolve {ingress_host}:443:{cluster_ip} "
+        f"{target_url}"
+    )
+
+    logging.info(f"🌍 Starting Connectivity Check: {target_url}")
+    logging.info(f"Resolution override: {ingress_host} -> {cluster_ip}")
+
+    # Polling Loop (Replaces time.sleep(15))
+    for attempt in range(1, 11):
+        stdout, _ = run_command(curl_cmd, check=False)
+        status_code = stdout.strip()
+
+        if status_code == "200":
+            logging.info(f"✅ SUCCESS: Endpoint returned 200 OK on attempt {attempt}")
+            return True
         
-        if not found_mtls:
-            raise Exception(f"❌ Envoy Config FAIL: No TLS found for {target_svc}")
+        logging.warning(f"Attempt {attempt}: Got status '{status_code}'. Retrying in 3s...")
+        time.sleep(3)
+
+    logging.error("❌ Connectivity check failed after all retries.")
+    return False
+
+# --- Main Execution ---
+
+def check_ingress_gateway():
+    logging.info("--- 5. Checking Ingress Gateway (Best Practice) ---")
+
+    try:
+        # STEP 1: Get Infrastructure Info FIRST
+        # We do this before applying YAML so we can inject the hostname directly.
+        real_ingress_host, internal_ip = get_ingress_info_cli(
+            ISTIO_NAMESPACE, INGRESS_SVC_NAME
+        )
+
+        # STEP 2: Apply Fully Configured YAML
+        # No patching required. The Gateway is created correctly from the start.
+        apply_yaml_template(
+            "ingress.yaml",
+            TEST_GATEWAY_NAME=TEST_GATEWAY_NAME,
+            TEST_NAMESPACE=TEST_NAMESPACE,
+            INGRESS_HOST=real_ingress_host,
+            TARGET_APP_NAME=TARGET_APP_NAME
+        )
+
+        # STEP 3: Verify Connectivity
+        # We poll immediately. Istio is usually fast.
+        success = verify_connectivity(real_ingress_host, internal_ip)
+        
+        if not success:
+            logging.error("Ingress Gateway Verification FAILED.")
+            sys.exit(1)
+            
+        logging.info("🎉 Ingress Gateway Verification PASSED.")
 
     except Exception as e:
-        logger.error(f"Failed to verify Envoy config: {e}")
-        raise
+        logging.error(f"Fatal Error: {e}")
+        sys.exit(1)
 
-# --- Main Entry Point ---
-
-def run_istio_mtls_tests():
-    """
-    No arguments needed! It just runs the suite based on config.py.
-    """
-    logger.info("Starting Istio mTLS Verification Suite...")
-    
-    logger.info(f"--- Test 1: Sidecar -> Sidecar ({config.CLIENT_SIDECAR_NAME}) ---")
-    check_connection(config.CLIENT_SIDECAR_NAME, expect_success=True)
-
-    logger.info("--- Test 2: Envoy Configuration Check ---")
-    verify_envoy_config()
-
-    logger.info(f"--- Test 3: No-Sidecar -> Sidecar ({config.CLIENT_NO_SIDECAR_NAME}) ---")
-    check_connection(config.CLIENT_NO_SIDECAR_NAME, expect_success=False)
-
-    logger.info("🎉 All Istio mTLS tests PASSED successfully.")
+if __name__ == "__main__":
+    check_ingress_gateway()
