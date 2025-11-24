@@ -1,201 +1,49 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: istio-verify-configmap
-  namespace: af-toolkit
-data:
-  test-apps.yaml: |
-    apiVersion: v1
-    kind: Namespace
-    metadata:
-      name: {TEST_NAMESPACE}
-      labels:
-        istio.io/rev: {ISTIO_REVISION}
-    ---
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: test-target-app
-      namespace: {TEST_NAMESPACE}
-    spec:
-      replicas: 1
-      selector:
-        matchLabels:
-          app: test-target-app
-      template:
-        metadata:
-          labels:
-            app: test-target-app
-        spec:
-          containers:
-          - name: template-service
-            image: 030558737990.dkr.ecr.ap-east-1.amazonaws.com/platform-runtime-java17:v3
-            ports:
-            - containerPort: 8080
-    ---
-    apiVersion: v1
-    kind: Service
-    metadata:
-      name: test-target-app
-      namespace: {TEST_NAMESPACE}
-    spec:
-      ports:
-      - name: http
-        port: 8000
-        targetPort: 8080
-      selector:
-        app: test-target-app
-    ---
-    apiVersion: v1
-    kind: Pod
-    metadata:
-      name: curl-client
-      namespace: {TEST_NAMESPACE}
-      labels:
-        app: curl-client # <-- ADD THIS LABEL
-    spec:
-      containers:
-      - name: curl
-        image: curlimages/curl:latest # <-- Make sure this is whitelisted
-        command: ["sleep", "3600"]
-  
-  # ... (no-sidecar-curl.yaml and mtls-strict.yaml are unchanged) ...
-  no-sidecar-curl.yaml: |
-    # ...
-  mtls-strict.yaml: |
-    # ...
-  
-  ingress.yaml: |
-    # ... (ingress.yaml is unchanged) ...
-
-  # --- ADD THIS NEW FILE ---
-  retry-vs.yaml: |
-    apiVersion: networking.istio.io/v1alpha3
-    kind: VirtualService
-    metadata:
-      name: retry-after-test-vs
-      namespace: {{TEST_NAMESPACE}}
-    spec:
-      # Apply to all sidecars in the namespace
-      gateways:
-      - mesh
-      # A fake hostname just for this test
-      hosts:
-      - "retry-test.local" 
-      http:
-      - name: "retry-route" # We will patch this route name
-        match:
-        - uri:
-            prefix: "/test-retry"
-        
-        # 1. Simulate a 503 error to trigger the retry
-        fault:
-          abort:
-            httpStatus: 503
-            percentage:
-              value: 100.0
-              
-        # 2. Tell the sidecar it's allowed to retry
-        retries:
-          attempts: 3
-          perTryTimeout: 1s
-          retryOn: "gateway-error,connect-failure,503"
-          
-        # 3. Add the header to the *response*
-        headers:
-          response:
-            set:
-              "retry-after": "2" # Tell the client to wait 2 seconds
-
-        # 4. Route to a "blackhole" (doesn't matter, the fault happens first)
-        route:
-        - destination:
-            host: "blackhole.local"
-
-  # --- ADD THIS NEW FILE ---
-  retry-envoyfilter.yaml: |
-    apiVersion: networking.istio.io/v1alpha3
-    kind: EnvoyFilter
-    metadata:
-      name: retry-after-test-ef
-      namespace: {{TEST_NAMESPACE}}
-    spec:
-      # This filter will ONLY apply to your client pod
-      workloadSelector:
-        labels:
-          app: {{CLIENT_APP_NAME}}
-          
-      configPatches:
-      - applyTo: HTTP_ROUTE
-        match:
-          context: SIDECAR_OUTBOUND # Apply to outgoing traffic
-          routeConfiguration:
-            vhost:
-              name: "retry-test.local:80" # Must match the VS host/port
-              route:
-                name: "retry-route" # Must match the VS route name
-        patch:
-          operation: MERGE
-          value:
-            # This is the "magic" that enables respecting the header
-            retry_policy:
-              rate_limited_retry_back_off:
-                reset_headers:
-                - name: "retry-after"
-                  format: SECONDS
-              max_interval: "5s" # A safety cap
-
-
-
-
-# This is the complete, correct retry-template.yaml
-# It contains THREE separate resources.
-
-# RESOURCE 1: VIRTUAL SERVICE (for CLIENT)
-# This ONLY tells the client how to retry.
 apiVersion: networking.istio.io/v1alpha3
 kind: VirtualService
 metadata:
-  name: {RETRY_VIRTUAL_SERVICE_NAME}
-  namespace: {TEST_NAMESPACE}
+  name: retry-injector
+  namespace: $TEST_NAMESPACE
 spec:
   hosts:
-  - {TARGET_APP_NAME}
+  - "$TARGET_APP_NAME.$TEST_NAMESPACE.svc.cluster.local"
   http:
-  - match:
-    - uri:
-        prefix: "/test-retry"
-      method:
-        exact: GET
-    retries:
-      attempts: {RETRY_ATTEMPTS}
-      perTryTimeout: 1s
-      retryOn: "gateway-error,connect-failure,503"
-    route:
+  - route:
     - destination:
-        host: {TARGET_APP_NAME}
+        host: "$TARGET_APP_NAME.$TEST_NAMESPACE.svc.cluster.local"
         port:
-          number: 80
-# RESOURCE 2: CLIENT ENVOYFILTER
-# This patches the CLIENT's outbound proxy to obey the 'retry-after' header.
+          number: 8080
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+      retryOn: "gateway-error,connect-failure,503"
+    fault:
+      abort:
+        httpStatus: 503
+        percentage:
+          value: 100 # Always fail
+    headers:
+      response:
+        set:
+          retry-after: "2" # Force this header into the response
+
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
 metadata:
-  name: {RETRY_ENVOY_FILTER}
-  namespace: {TEST_NAMESPACE}
+  name: retry-after-filter
+  namespace: $TEST_NAMESPACE
 spec:
   workloadSelector:
     labels:
-      app: {CLIENT_APP_NAME} # <-- Selects the CLIENT
+      app: $CLIENT_APP_NAME # Apply to your sleep/client pod
   configPatches:
   - applyTo: HTTP_ROUTE
     match:
-      context: SIDECAR_OUTBOUND # <-- Applies to CLIENT's outbound traffic
+      context: SIDECAR_OUTBOUND
       routeConfiguration:
         vhost:
-          name: "{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:80"
+          name: "$TARGET_APP_NAME.$TEST_NAMESPACE.svc.cluster.local:8080" # Match internal DNS
           route:
-            name: "retry-route"
+            name: default
     patch:
       operation: MERGE
       value:
@@ -203,45 +51,5 @@ spec:
           retry_policy:
             rate_limited_retry_back_off:
               reset_headers:
-              - name: "retry-after"
-                format: ENVOY_RATELIMIT_RESET
-            max_interval: "5s"
----
-# RESOURCE 3: SERVER LUA FILTER (This is the new, correct solution)
-# This patches the SERVER's inbound proxy to send the 503 + 'retry-after'
-apiVersion: networking.istio.io/v1alpha3
-kind: EnvoyFilter
-metadata:
-  name: server-fault-injector
-  namespace: {TEST_NAMESPACE}
-spec:
-  workloadSelector:
-    labels:
-      app: {TARGET_APP_NAME} # <-- Selects the SERVER
-  configPatches:
-  - applyTo: HTTP_FILTER
-    match:
-      context: SIDECAR_INBOUND # <-- Applies to SERVER's inbound traffic
-      listener:
-        filterChain:
-          filter:
-            name: "envoy.filters.network.http_connection_manager"
-    patch:
-      operation: INSERT_BEFORE # <-- Inserts this Lua filter before the router
-      value:
-        name: envoy.filters.http.lua
-        typed_config:
-          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
-          inline_code: |
-            function envoy_on_request(request_handle)
-              -- This single command does both:
-              -- 1. Aborts the request
-              -- 2. Sends the 503 status AND the retry-after header
-              request_handle:respond(
-                {
-                  [":status"] = "503",
-                  ["retry-after"] = "{RETRY_SECONDS}"
-                },
-                "service unavailable" -- This is the response body
-              )
-            end
+              - name: retry-after
+              max_interval: "5s"
