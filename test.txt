@@ -1,29 +1,58 @@
-This PR establishes the Kubernetes infrastructure required to automate Istio release verification. It introduces a CronJob, a ConfigMap containing test fixtures, and the necessary RBAC permissions to allow the test runner to manage ephemeral environments.
+Job
 
-This change enables the platform to run automated verification suites (e.g., post-upgrade or on a schedule) by providing the necessary runtime environment and access controls.
+📝 Description
+This PR introduces a new automated verification suite, verify_ingress_gateway.py, designed to run as a Kubernetes Job during the release pipeline.
 
-🛠 Infrastructure Changes
-1. CronJob (release-verification-istio)
-Purpose: Acts as the runner for the verification suite.
+The goal of this tool is to perform "Runtime Verification" of Istio configurations inside the cluster. Unlike static analysis (istioctl analyze), this script verifies that the Envoy data plane is correctly programmed, routes are active, and security policies (RBAC) are enforcing access control before we promote a release.
 
-Schedule: Configured to run @monthly, but set to suspend: true by default to allow for controlled, manual triggering or pipeline-based execution.
+🚀 Key Features
+This script implements a 3-stage verification process using Pure Python (zero external dependencies like tenacity or requests):
 
-Configuration: Mounts the test manifests from the ConfigMap into the container at /etc/istio-verify-config.
+Test A: Positive Connectivity (Routing)
 
-2. ConfigMap (release-verification-istio-cm)
-Stores the Kubernetes manifests used by the test runner to spin up temporary workloads. The data includes:
+Verifies that the VirtualService and Gateway are correctly wired.
 
-test-apps.yaml: Templates for the Target Service, Deployment, and Client Sidecar pod.
+Ensures the application is reachable via the Ingress Gateway using the internal ClusterIP.
 
-no-sidecar-verify-client.yaml: Template for the negative-test client (explicitly configured with sidecar.istio.io/inject: "false").
+Test B: Security Isolation (Wildcard Prevention)
 
-3. RBAC Permissions (ClusterRole & Binding)
-The test runner requires elevated permissions to manage the lifecycle of ephemeral test environments.
+Mechanism: Connects with a valid SNI but injects an invalid Host header (e.g., unauthorized-domain.com).
 
-ServiceAccount: Binds the CronJob to a dedicated identity.
+Expectation: 404 Not Found.
 
-ClusterRole Permissions: Grants create, get, list, watch, delete, and patch verbs on:
+Why: Prevents "Host Hijacking," where a misconfigured VirtualService (e.g., accidental * wildcard) might steal traffic from other production services on the shared Gateway.
 
-namespaces (to create/destroy test-ns-xxx)
+Test C: Access Control (RBAC)
 
-pods, deployments, services, configmaps, secrets, serviceaccounts (to deploy test apps within the ephemeral namespace).
+Mechanism: Applies a temporary AuthorizationPolicy to the test workload.
+
+Expectation:
+
+Requests without a token return 403 Forbidden.
+
+Requests with the correct token return 200 OK.
+
+Why: Verifies that the platform correctly enforces security policies.
+
+⚙️ Architectural Decisions
+Dependency-Free: The script uses standard library subprocess, time, and socket. This keeps the Docker image lightweight and reduces supply chain risks.
+
+Internal Resolution: We resolve the Ingress Gateway via its ClusterIP using curl --resolve. This bypasses external DNS/LoadBalancers to ensure deterministic, fast results without "hairpinning" issues.
+
+TLS Handling: We use curl -k to bypass certificate trust validation. This is intentional: we are testing Layer 7 Routing and Layer 4 Connectivity, not the container's root trust store or certificate expiration (which is monitored separately by cert-manager).
+
+Robust Cleanup: Wrapped in a try...finally block to ensure all ephemeral resources (Gateway, VirtualService, AuthorizationPolicy) are deleted, even if the test fails.
+
+📂 Files Added
+tasks/k8s-baseline-app/istio/tests/verify_ingress_gateway.py: Main logic script.
+
+tasks/k8s-baseline-app/istio/tests/ingress.yaml: Template for Gateway/VS resources.
+
+tasks/k8s-baseline-app/istio/tests/auth-policy.yaml: Template for AuthorizationPolicy testing.
+
+🧪 Testing Strategy
+[x] Local Test: Ran the script against a dev cluster; verified all 3 stages pass.
+
+[x] Failure Test: Manually broke the VirtualService config to confirm the script raises an exception and cleans up resources.
+
+[x] Timeout Test: Verified that the custom retry logic waits for the Gateway IP allocation (up to 60s) before failing.
