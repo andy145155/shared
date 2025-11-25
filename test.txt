@@ -32,3 +32,50 @@ Executes curl with high-precision timing (-w "%{time_total}") against the target
 
 Validates that the total request duration matches the expected Attempts * Wait_Time formula (approx. 6s for 3 retries of 2s each).
 
+
+
+
+refactor: Co-locate Testing Manifests with Python Test Suite
+
+1. Context & Problem
+
+Currently, the Kubernetes manifests used for integration testing are stored in the ArgoCD configuration folder (/argocd or similar), separate from the Python test scripts that rely on them.
+
+This separation creates several issues:
+
+High Cognitive Load: Developers must navigate between widely separated directories to understand how a test interacts with the cluster.
+
+Brittle Dependencies: Modifying a test often requires changes in two disparate locations, increasing the risk of version mismatches.
+
+Deployment Coupling: Test resources are implicitly tied to the CD deployment lifecycle rather than being owned and managed by the test suite itself.
+
+2. Objective
+
+The goal of this PR is to move all test-specific manifests from the ArgoCD directory into the Python test directory. By co-locating the test logic (.py) with its required data (.yaml), we ensure that tests are self-contained, portable, and easier to maintain.
+
+3. Changes
+
+Moved Manifests: Transferred testing YAMLs (VirtualServices, DestinationRules, etc.) from argocd/testing-manifests/ to tests/manifests/ (or tests/templates/).
+
+Updated File Paths: Updated the Python test scripts to reference the new local file paths instead of relying on external ArgoCD paths.
+
+Cleanup: Removed the now-redundant manifest files from the ArgoCD directory.
+
+4. Benefits
+
+Self-Contained Tests: You can now run the full test suite locally without needing a specific ArgoCD sync state or external file dependencies.
+
+Improved Maintainability: Related code and configuration live together. A change to the test logic and its corresponding infrastructure can be reviewed in a single context.
+
+Cleaner CD Pipelines: The ArgoCD repository is now focused purely on application deployment, uncluttered by transient test artifacts.
+
+5. Verification
+
+Run the Python test suite to ensure it can successfully locate and apply the moved manifests:
+
+python3 tests/verify_retry_after.py
+
+
+Verify that no "file not found" errors occur during the apply_manifests step.
+
+Confirm that the test logic executes successfully with the manifests loaded from the new location.
