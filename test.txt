@@ -1,58 +1,34 @@
-Job
+feat: Automate Istio "Retry-After" Header Verification
 
-📝 Description
-This PR introduces a new automated verification suite, verify_ingress_gateway.py, designed to run as a Kubernetes Job during the release pipeline.
+1. Context & Objective
 
-The goal of this tool is to perform "Runtime Verification" of Istio configurations inside the cluster. Unlike static analysis (istioctl analyze), this script verifies that the Envoy data plane is correctly programmed, routes are active, and security policies (RBAC) are enforcing access control before we promote a release.
+We are introducing automated verification for Istio's Retry-After header handling. Previously, verifying that Envoy respects the Retry-After header during 503 failures was a manual process involving complex setup and manual editing of VirtualServices.
 
-🚀 Key Features
-This script implements a 3-stage verification process using Pure Python (zero external dependencies like tenacity or requests):
+The goal of this PR is to fully automate this scenario to ensure consistent regression testing for Istio's rate-limited retry backoff capabilities without requiring manual intervention.
 
-Test A: Positive Connectivity (Routing)
+2. Solution Design
 
-Verifies that the VirtualService and Gateway are correctly wired.
+To fully automate this test without modifying the application code or relying on external mocks, we utilize EnvoyFilter resources to programmatically inject the necessary test conditions directly into the service mesh.
 
-Ensures the application is reachable via the Ingress Gateway using the internal ClusterIP.
+This approach simulates a realistic network scenario where an upstream service requests a backoff, and the downstream client respects it.
 
-Test B: Security Isolation (Wildcard Prevention)
+Key Components
 
-Mechanism: Connects with a valid SNI but injects an invalid Host header (e.g., unauthorized-domain.com).
+Target-Side Header Injection (EnvoyFilter):
+We deploy an EnvoyFilter to the target service's Inbound Listener. This filter injects the Retry-After: 2 header into 503 responses. This ensures the header is physically present on the network wire, allowing the Client Sidecar to see it and trigger the backoff logic.
 
-Expectation: 404 Not Found.
+Client-Side Retry Configuration (VirtualService & EnvoyFilter):
 
-Why: Prevents "Host Hijacking," where a misconfigured VirtualService (e.g., accidental * wildcard) might steal traffic from other production services on the shared Gateway.
+VirtualService: Defines the basic retry policy (retry on 503, 3 attempts).
 
-Test C: Access Control (RBAC)
+EnvoyFilter: Patches the retry policy to enable rate_limited_retry_back_off (reading the header) and explicitly sets retry_host_predicate: []. This configuration allows the client to retry against the same pod, enabling the test to run successfully in single-replica test environments.
 
-Mechanism: Applies a temporary AuthorizationPolicy to the test workload.
+Automation Script (verify_retry_after.py):
+A new Python script that orchestrates the test lifecycle:
 
-Expectation:
+Applies the temporary Istio manifests.
 
-Requests without a token return 403 Forbidden.
+Executes curl with high-precision timing (-w "%{time_total}") against the target's fault endpoint.
 
-Requests with the correct token return 200 OK.
+Validates that the total request duration matches the expected Attempts * Wait_Time formula (approx. 6s for 3 retries of 2s each).
 
-Why: Verifies that the platform correctly enforces security policies.
-
-⚙️ Architectural Decisions
-Dependency-Free: The script uses standard library subprocess, time, and socket. This keeps the Docker image lightweight and reduces supply chain risks.
-
-Internal Resolution: We resolve the Ingress Gateway via its ClusterIP using curl --resolve. This bypasses external DNS/LoadBalancers to ensure deterministic, fast results without "hairpinning" issues.
-
-TLS Handling: We use curl -k to bypass certificate trust validation. This is intentional: we are testing Layer 7 Routing and Layer 4 Connectivity, not the container's root trust store or certificate expiration (which is monitored separately by cert-manager).
-
-Robust Cleanup: Wrapped in a try...finally block to ensure all ephemeral resources (Gateway, VirtualService, AuthorizationPolicy) are deleted, even if the test fails.
-
-📂 Files Added
-tasks/k8s-baseline-app/istio/tests/verify_ingress_gateway.py: Main logic script.
-
-tasks/k8s-baseline-app/istio/tests/ingress.yaml: Template for Gateway/VS resources.
-
-tasks/k8s-baseline-app/istio/tests/auth-policy.yaml: Template for AuthorizationPolicy testing.
-
-🧪 Testing Strategy
-[x] Local Test: Ran the script against a dev cluster; verified all 3 stages pass.
-
-[x] Failure Test: Manually broke the VirtualService config to confirm the script raises an exception and cleans up resources.
-
-[x] Timeout Test: Verified that the custom retry logic waits for the Gateway IP allocation (up to 60s) before failing.
