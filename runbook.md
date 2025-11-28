@@ -1,157 +1,44 @@
-# PLC-004: Istio Release Runbook
+This PR introduces a new, comprehensive Python-based automation suite for verifying the health and security of the Istio service mesh.
 
-* **Background**
-* **CIA**
-* **References**
-* **Prerequisites**
-* **Process Steps**
-    * Pre-actions (IAM & Images)
-    * Apply Release Changes (Non-Prod vs Prod)
-    * Execution (ArgoCD Sync)
-    * Verification
-    * Post-actions
-* **Rollback Plan**
+Instead of manual verification, this script automates the setup of test applications, validates the Control Plane status, and explicitly tests strict mTLS enforcement policies (allowing mesh-to-mesh traffic while blocking legacy-to-mesh traffic).
 
----
+🚀 Key Features
+1. Control Plane Verification (verify_istio_control_plane)
+Deployment Status: verifies the istiod deployment is available and ready.
 
-### Background
-To provide a standardized, repeatable procedure for releasing a new version of the Istio service mesh in a controlled manner.
-* **Goal:** Zero-downtime upgrade of Control Plane (`istiod`) and Data Plane (Sidecars/Gateways).
-* **Strategy:** Canary upgrade using ArgoCD (Dual Control Plane).
+Proxy Synchronization: Checks for STALE proxies using istioctl proxy-status with retry logic to handle transient sync delays.
 
----
+Configuration Analysis: Runs istioctl analyze to detect potential validation issues in the cluster.
 
-### CIA
-Describe potential impacts based on [Change Impact Analysis Standard]
+2. mTLS Security Testing (run_istio_mtls_tests)
+Implements a "Strict mTLS" validation suite that runs two specific connectivity scenarios:
 
-| Impact type | Change requirements |
-| :--- | :--- |
-| **No customer impact** | • **HW Change Required**<br>• [Disrupts existing customer workloads] risk is managed via Canary upgrade.<br>• **Note:** Potential momentary 5xx errors during sidecar rotation. |
+✅ Allowed: Verifies that a mesh-enabled pod (Sidecar) can successfully communicate with another mesh-enabled pod.
 
----
+❌ Blocked: Verifies that a non-mesh pod (No-Sidecar/Legacy) is forbidden from communicating with a mesh-enabled pod.
 
-### References
+Note: Includes logic to dynamically resolve Pod names via labels to ensure kubectl exec commands target the correct containers.
 
-| Item | Details |
-| :--- | :--- |
-| **Owner (Squad)** | Application Foundation (@Cindy Ng @Dave Lui @Day Yeung @Martin Kiesel @Nick Chan @Titus Chu) |
-| **Change Type** | [HWC (heavy weight change)] |
-| **System Documentation** | [Architecture diagrams, service docs] |
-| **Monitoring & Dashboards** | [Datadog: AF Service Version Tracking]<br>[TMV Grafana Dashboard] |
-| **Repos** | `platform-docker-images` (Images)<br>`argocd-apps` (Config)<br>`terraform-aws-eks-cluster` (IAM) |
-| **Escalation** | Slack: `#squad-platform-foundation` |
+3. Test Infrastructure (setup_test_apps)
+Automates the deployment of Client and Target test applications via YAML templates.
 
----
+Includes robust "Wait" logic to ensure Deployments and Pods are fully Ready before tests begin.
 
-### Prerequisites
-Before running this procedure, ensure the following are in place:
-* **Access:** VPN, `kubectl` access to target clusters, ArgoCD apply access.
-* **Tools:** `kubectl`, `istioctl` (matching target version).
-* **Dependencies:** Other services or teams that must be aligned.
-* **Safety Checks:** Confirm backups, failover, readiness, approvals in place.
-* **Notify stakeholders:**
-    * Align with `#squad-core-banking` on `tm-vault` cluster Istio deployment timeline.
+Verifies successful sidecar injection on targeted namespaces.
 
----
+⚙️ Configuration & Linting Updates
+Updated the Pylint configuration to align with Python PEP 8 standards and project requirements:
 
-### Process Steps
+Indentation: Changed from 2 spaces to 4 spaces for better readability.
 
-#### 1. Pre-actions
+Rules: Disabled C0114 (Missing module docstring) to reduce noise in file headers.
 
-**Verify IAM Policy**
-* Update the IAM policy if the application requires additional permissions.
-    * *Example:* `terraform-aws-eks-cluster`: AF-5871: Update IAM policy aws-loadbalancer-controller.
-    * *Check:* `rbac_sa_external_dns.tf`
+🛡️ Error Handling
+Implemented a Fail-Fast architecture.
 
-**Prepare Docker Image**
-* Build and push image with the updated version in the `ProjectDrgn/platform-docker-images`.
-* Review previous PRs for guidance on expected changes and validation approach.
-    * *Ref:* `platform-docker-images`: PLOPS-368 / PLOPS-393.
-* **Warning:** If Snyk errors occur during build, follow the [Image Patching Process] for resolution.
+Replaced generic exceptions with specific subprocess.CalledProcessError handling for command failures and RuntimeError for logical verification failures.
 
-#### 2. Apply Release Changes (Workflow)
+Ensures specific exit codes are returned to CI/CD pipelines upon failure.
 
-**A. Non-prod (PTDEV)**
-1.  Create a branch and update the version or config in `values.yaml`.
-2.  **Test in `ptdev` before promotion:**
-    * Push your commit changes *directly* to the `ptdev` branch.
-    * Release new `ptdev` resources via ArgoCD -> follow **Execution** section below.
-    * Validate services in `ptdev` -> follow **Verification** section below.
-3.  Once validation passes, submit a PR that includes non-prod changes.
-    * *Note:* Always use latest chart version bump.
-    * *Ref:* `argocd-apps`: PLOPS-393 (Train 4 non-prod).
-
-**B. Prod (STG / PROD)**
-1.  Create a branch and update the prod version or config in `values.yaml`.
-2.  Confirm all non-prod environments have passed verification steps.
-3.  Submit a change ticket according to the **Change Type** before promoting to prod.
-4.  Create a PR that includes:
-    * Apply version or configuration changes.
-    * Clear description with links to: **Change ticket**, **Evidence of non-prod PR**, **Related Jira task**.
-    * *Ref:* `argocd-apps`: PROD-41427 (Train 4 PROD).
-
----
-
-#### 3. Execution (ArgoCD Sync)
-
-**Go to deployment resources and open the ArgoCD link for your app.**
-
-**Step 1: `istio-base` upgrade**
-1.  After merging the version bump PR to the main branch, confirm that the **SYNC STATUS** shows `OutOfSync` (yellow).
-2.  Click **DIFF** to confirm that the manifest reflects your intended changes.
-3.  Click **SYNC** (Ensure "Prune" is **DISABLED**).
-4.  Wait until the sync is complete and verify that the app health status returns to **Healthy**.
-
-**Step 2: `istiod` upgrade**
-1.  Repeat the sync process for the `istiod` application.
-2.  **Note:** It is expected to see `OutOfSync` as old `istiod` components should handle Istio-enabled services with old proxies.
-3.  Wait until app status is **Healthy**.
-
-**Step 3: Sidecar Rotation (Apply new version to workloads)**
-*Do either (a) Restart Services or (b) EKS Node Rolling*
-
-* **(a) Restart Istio enabled services:**
-    1.  Go to `af-toolkit` in ArgoCD.
-    2.  Locate job: `sequential-restart-all-istio-enabled-services`.
-    3.  **Sync the Job Only:** Click the options (three dots) on the job -> Sync -> **Force Enabled**.
-    4.  *Warning:* DO NOT sync the entire `af-toolkit` app.
-* **(b) EKS Node Rolling:**
-    1.  If performing alongside EKS upgrade, proceed with Node Group rollout.
-
----
-
-#### 4. Verification
-
-| Action | Expected Result | Env | Notes |
-| :--- | :--- | :--- | :--- |
-| **[Review service logs]** | [No errors or critical warnings] | [STG] | Check `istiod` logs for `error` or `warn`. |
-| **[Check services health]** | [All endpoints return success (200/OK)] | [PTDEV, PROD] | Ensure no pods are stuck in `CrashLoopBackOff`. |
-| **[Test Whitelist]** | `curl -vvv template-service...` returns **200 OK** | [STG] | Verify AuthorizationPolicy allows traffic. |
-| **[Test Blocklist]** | `curl -vvv mf-trading-service...` returns **403 Forbidden** | [STG] | Verify RBAC denies traffic ("access denied"). |
-| **[Verify alerts]** | [No new alerts triggered] | [STG, PROD] | Confirm in Datadog/PagerDuty. |
-| **[Promotion wait period]** | [STG environment remains stable for at least X days/weeks] | [STG] | Required before PROD rollout. |
-
----
-
-#### 5. Post-actions
-* [Remove maintenance mode (if enabled)]
-* [Verify monitoring alerts remain quiet]
-* **[Prune Old Control Plane]:** Once verification is complete, Sync `istiod` with **Prune ENABLED** to remove legacy versions.
-* [Update status in Jira/Confluence/Ticket as complete]
-* [Capture issues / improvements]
-
----
-
-### Rollback Plan
-*[Emergency Revert Procedure]*
-
-Describe how to safely return the system to its previous state if this change fails.
-
-1.  **Revert Git Changes:**
-    * Revert the PR in `argocd-apps` (restore `values.yaml` to previous version).
-2.  **Sync ArgoCD:**
-    * Sync `istio-base` and `istiod` to the reverted version.
-3.  **Restart Sidecars:**
-    * Rerun the `sequential-restart-all-istio-enabled-services` job in `af-toolkit` (with **Force**) to inject the old proxy version back into workloads.
-4.  **Verify Rollback:**
-    * Reuse the **Verification** table steps above (specifically the `curl` commands) to ensure traffic flow is restored.
+🧪 Verification
+How to run locally:
