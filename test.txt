@@ -1,81 +1,71 @@
-feat: Automate Istio "Retry-After" Header Verification
+Getting `ruff` set up on a Mac is a great move—it’s incredibly fast and replaces multiple tools like Flake8, isort, and Black in one go.
 
-1. Context & Objective
+Here is a clean, "Quick Start" workflow you can drop directly into your README.
 
-We are introducing automated verification for Istio's Retry-After header handling. Previously, verifying that Envoy respects the Retry-After header during 503 failures was a manual process involving complex setup and manual editing of VirtualServices.
+-----
 
-The goal of this PR is to fully automate this scenario to ensure consistent regression testing for Istio's rate-limited retry backoff capabilities without requiring manual intervention.
+## ⚡ Using Ruff Locally (macOS)
 
-2. Solution Design
+Ruff is an extremely fast Python linter and code formatter, written in Rust. Use this guide to get up and running on your MacBook.
 
-To fully automate this test without modifying the application code or relying on external mocks, we utilize EnvoyFilter resources to programmatically inject the necessary test conditions directly into the service mesh.
+### 1\. Installation
 
-This approach simulates a realistic network scenario where an upstream service requests a backoff, and the downstream client respects it.
+The easiest way to install Ruff on macOS is via **Homebrew** (system-wide) or **pip** (project-specific).
 
-Key Components
+  * **Using Homebrew (Recommended):**
+    ```bash
+    brew install ruff
+    ```
+  * **Using pip:**
+    ```bash
+    pip install ruff
+    ```
 
-Target-Side Header Injection (EnvoyFilter):
-We deploy an EnvoyFilter to the target service's Inbound Listener. This filter injects the Retry-After: 2 header into 503 responses. This ensures the header is physically present on the network wire, allowing the Client Sidecar to see it and trigger the backoff logic.
+### 2\. Basic Workflow
 
-Client-Side Retry Configuration (VirtualService & EnvoyFilter):
+Ruff handles both **linting** (finding errors/smells) and **formatting** (styling code).
 
-VirtualService: Defines the basic retry policy (retry on 503, 3 attempts).
+| Action | Command | Description |
+| :--- | :--- | :--- |
+| **Check** | `ruff check .` | Lint the current directory for errors. |
+| **Fix** | `ruff check --fix .` | Automatically fix linting errors (like unused imports). |
+| **Format** | `ruff format .` | Reformat code (Black-compatible style). |
+| **Watch** | `ruff check --watch .` | Run Ruff in the background as you save files. |
 
-EnvoyFilter: Patches the retry policy to enable rate_limited_retry_back_off (reading the header) and explicitly sets retry_host_predicate: []. This configuration allows the client to retry against the same pod, enabling the test to run successfully in single-replica test environments.
+### 3\. Editor Integration (VS Code)
 
-Automation Script (verify_retry_after.py):
-A new Python script that orchestrates the test lifecycle:
+To get the most out of Ruff, you should see errors in real-time within your editor.
 
-Applies the temporary Istio manifests.
+1.  Open VS Code.
+2.  Install the **Ruff extension** from the Marketplace.
+3.  (Optional) Enable "Format on Save" in your settings:
+      * `"editor.formatOnSave": true`
+      * `"editor.defaultFormatter": "charliermarsh.ruff"`
 
-Executes curl with high-precision timing (-w "%{time_total}") against the target's fault endpoint.
+### 4\. Configuration
 
-Validates that the total request duration matches the expected Attempts * Wait_Time formula (approx. 6s for 3 retries of 2s each).
+While Ruff works out of the box, you can customize rules in a `pyproject.toml` file at the root of your project:
 
+```toml
+[tool.ruff]
+# Line length similar to Black
+line-length = 88
 
+[tool.ruff.lint]
+# Enable Pyflakes (F) and check for common bug (E) codes
+select = ["E", "F", "I"] 
+# I = isort (import sorting)
+```
 
+-----
 
-refactor: Co-locate Testing Manifests with Python Test Suite
+### 📚 Documentation
 
-1. Context & Problem
+For advanced configurations, CI/CD integration, and a full list of rules, refer to the official docs:
 
-Currently, the Kubernetes manifests used for integration testing are stored in the ArgoCD configuration folder (/argocd or similar), separate from the Python test scripts that rely on them.
+  * [Ruff Official Documentation](https://docs.astral.sh/ruff/)
+  * [List of Available Rules](https://docs.astral.sh/ruff/rules/)
 
-This separation creates several issues:
+-----
 
-High Cognitive Load: Developers must navigate between widely separated directories to understand how a test interacts with the cluster.
-
-Brittle Dependencies: Modifying a test often requires changes in two disparate locations, increasing the risk of version mismatches.
-
-Deployment Coupling: Test resources are implicitly tied to the CD deployment lifecycle rather than being owned and managed by the test suite itself.
-
-2. Objective
-
-The goal of this PR is to move all test-specific manifests from the ArgoCD directory into the Python test directory. By co-locating the test logic (.py) with its required data (.yaml), we ensure that tests are self-contained, portable, and easier to maintain.
-
-3. Changes
-
-Moved Manifests: Transferred testing YAMLs (VirtualServices, DestinationRules, etc.) from argocd/testing-manifests/ to tests/manifests/ (or tests/templates/).
-
-Updated File Paths: Updated the Python test scripts to reference the new local file paths instead of relying on external ArgoCD paths.
-
-Cleanup: Removed the now-redundant manifest files from the ArgoCD directory.
-
-4. Benefits
-
-Self-Contained Tests: You can now run the full test suite locally without needing a specific ArgoCD sync state or external file dependencies.
-
-Improved Maintainability: Related code and configuration live together. A change to the test logic and its corresponding infrastructure can be reviewed in a single context.
-
-Cleaner CD Pipelines: The ArgoCD repository is now focused purely on application deployment, uncluttered by transient test artifacts.
-
-5. Verification
-
-Run the Python test suite to ensure it can successfully locate and apply the moved manifests:
-
-python3 tests/verify_retry_after.py
-
-
-Verify that no "file not found" errors occur during the apply_manifests step.
-
-Confirm that the test logic executes successfully with the manifests loaded from the new location.
+Would you like me to help you write a **pre-commit hook** configuration so Ruff runs automatically before every git commit?
