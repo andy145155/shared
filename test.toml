@@ -1,0 +1,18 @@
+# pyproject.toml
+[tool.ruff]
+# Target version (e.g., python 3.10, 3.11, 3.12)
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+# Enable specific rules:
+# E/W: pycodestyle (standard linting)
+# F: Pyflakes (logical errors)
+# I: isort (import sorting) - VERY IMPORTANT
+# N: pep8-naming
+select = ["E", "W", "F", "I", "N"]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

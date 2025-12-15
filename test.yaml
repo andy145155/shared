@@ -1,55 +1,33 @@
-apiVersion: networking.istio.io/v1alpha3
-kind: VirtualService
-metadata:
-  name: retry-injector
-  namespace: $TEST_NAMESPACE
-spec:
-  hosts:
-  - "$TARGET_APP_NAME.$TEST_NAMESPACE.svc.cluster.local"
-  http:
-  - route:
-    - destination:
-        host: "$TARGET_APP_NAME.$TEST_NAMESPACE.svc.cluster.local"
-        port:
-          number: 8080
-    retries:
-      attempts: 3
-      perTryTimeout: 2s
-      retryOn: "gateway-error,connect-failure,503"
-    fault:
-      abort:
-        httpStatus: 503
-        percentage:
-          value: 100 # Always fail
-    headers:
-      response:
-        set:
-          retry-after: "2" # Force this header into the response
+name: Ruff
 
-apiVersion: networking.istio.io/v1alpha3
-kind: EnvoyFilter
-metadata:
-  name: retry-after-filter
-  namespace: $TEST_NAMESPACE
-spec:
-  workloadSelector:
-    labels:
-      app: $CLIENT_APP_NAME # Apply to your sleep/client pod
-  configPatches:
-  - applyTo: HTTP_ROUTE
-    match:
-      context: SIDECAR_OUTBOUND
-      routeConfiguration:
-        vhost:
-          name: "$TARGET_APP_NAME.$TEST_NAMESPACE.svc.cluster.local:8080" # Match internal DNS
-          route:
-            name: default
-    patch:
-      operation: MERGE
-      value:
-        route:
-          retry_policy:
-            rate_limited_retry_back_off:
-              reset_headers:
-              - name: retry-after
-              max_interval: "5s"
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 1: Run Ruff Linter (Check for errors)
+      # Defaults to 'ruff check' which looks for logic/style errors.
+      - name: Ruff Check (Lint)
+        uses: astral-sh/ruff-action@v3
+        with:
+            # We pin the version to avoid breaking changes in CI. 
+            # It is best practice to keep this aligned with your local version.
+            version: "0.9.1"
+            # args: "check --output-format=github" # (The action does this automatically)
+
+      # Step 2: Run Ruff Formatter (Check for formatting compliance)
+      # We use 'format --check' so it fails if files are not formatted, 
+      # rather than auto-formatting them silently.
+      - name: Ruff Format (Style)
+        uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.9.1"
+          args: "format --check"
