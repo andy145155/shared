@@ -1,97 +1,111 @@
 import logging
+import json
 import time
-import re
-# Assuming these are imported from your shared utils module
-# from utils import apply_yaml_template, run_command
+import subprocess
+# Assuming these are imported from your project structure
+from lib.utils import run_command, apply_yaml_template 
 
-def check_retry_after_header():
-    """
-    Verifies that Istio respects the Retry-After header during retries.
-    Uses Client Sidecar for retry logic and Target Sidecar for header injection.
-    """
-    logging.info("5. Checking Retry-After Header (EnvoyFilter Strategy)")
+# Configuration
+TEST_NAMESPACE = "test-namespace" # Update as needed
+HTTPBIN_TEMPLATE_PATH = "templates/httpbin_mtls.yaml"
+TARGET_APP_NAME = "httpbin"
+TARGET_PORT = 8000
 
-    # Configuration
-    TEST_NAMESPACE = "payment-service" # Replace with your dynamic var if needed
-    TARGET_APP_NAME = "template-service"
-    CLIENT_APP_NAME = "retry-after-curl"
-    RETRY_ATTEMPTS = 3
-    RETRY_SECONDS = 2
+def check_connection(source_pod: str, expect_success: bool, retries=3, delay=2):
+    """
+    Verifies connectivity AND mTLS encryption using httpbin.
+    """
+    # We hit the /headers endpoint to inspect incoming headers
+    target_url = f"http://{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:{TARGET_PORT}/headers"
     
-    # Path to the template file provided above
-    RETRY_TEMPLATE_PATH = "templates/retry_after_template.yaml.j2"
+    # -s: Silent (no progress bar)
+    # --connect-timeout: Fail fast if blocked
+    cmd = f"kubectl exec {source_pod} -n {TEST_NAMESPACE} -- curl -s --connect-timeout 5 {target_url}"
 
-    # Calculate expected duration
-    # Logic: 3 retries = 3 waits. (Wait -> Retry1 -> Wait -> Retry2 -> Wait -> Retry3)
-    MIN_EXPECTED_TIME = RETRY_SECONDS * RETRY_ATTEMPTS
-    MAX_EXPECTED_TIME = MIN_EXPECTED_TIME + 5  # Allow buffer for network overhead
-
-    try:
-        logging.info("STEP 1: Applying VirtualService and EnvoyFilters...")
-        apply_yaml_template(
-            RETRY_TEMPLATE_PATH,
-            TEST_NAMESPACE=TEST_NAMESPACE,
-            TARGET_APP_NAME=TARGET_APP_NAME,
-            CLIENT_APP_NAME=CLIENT_APP_NAME,
-            RETRY_ATTEMPTS=RETRY_ATTEMPTS,
-            RETRY_SECONDS=RETRY_SECONDS
-        )
-
-        logging.info("Waiting 5s for Envoy configuration propagation...")
-        time.sleep(5)
-
-        logging.info(f"STEP 2: Curling endpoint that returns 503...")
-        logging.info(f"Expectation: Should take >{MIN_EXPECTED_TIME}s due to Retry-After: {RETRY_SECONDS}s")
-
-        # Best Practice: Use curl -w to get exact timing instead of shell 'time'
-        # %{http_code}: Returns the final status code (e.g., 503)
-        # %{time_total}: Returns total duration in seconds
-        target_url = f"http://{TARGET_APP_NAME}.{TEST_NAMESPACE}.svc.cluster.local:8080/fault/abort?statusCode=503"
-        
-        curl_cmd = (
-            f"kubectl exec -n {TEST_NAMESPACE} {CLIENT_APP_NAME} -- "
-            f"curl -s -o /dev/null -w '%{{http_code}},%{{time_total}}' "
-            f"'{target_url}'"
-        )
-
-        # run_command returns (stdout, stderr) based on your screenshot
-        output, stderr_output = run_command(curl_cmd, check=False)
-
-        logging.info(f"Raw curl output: {output}")
-
-        # Parse metrics from stdout (format: CODE,TIME)
+    for attempt in range(1, retries + 1):
         try:
-            http_code, duration_str = output.strip().split(',')
-            real_time = float(duration_str)
-        except ValueError:
-            logging.error(f"Failed to parse curl output: {output}. Stderr: {stderr_output}")
-            raise Exception("Retry-After test FAILED: Could not parse metrics.")
-
-        logging.info(f"Test completed. HTTP code: '{http_code}', Elapsed time: {real_time:.2f}s")
-
-        # Validation
-        if http_code == "503" and MIN_EXPECTED_TIME <= real_time < MAX_EXPECTED_TIME:
-            logging.info(
-                f"SUCCESS: Test took {real_time:.2f}s "
-                f"(Expected range: {MIN_EXPECTED_TIME}-{MAX_EXPECTED_TIME}s) and returned 503."
-            )
-            logging.info("Retry-After header was correctly respected.")
-        else:
-            logging.error("FAILURE: Retry logic mismatch.")
-            if http_code != "503":
-                logging.error(f" - Expected HTTP 503, got {http_code}")
-            if real_time < MIN_EXPECTED_TIME:
-                logging.error(f" - Too Fast! {real_time:.2f}s < {MIN_EXPECTED_TIME}s (Envoy ignored the header)")
-            elif real_time >= MAX_EXPECTED_TIME:
-                logging.error(f" - Too Slow! {real_time:.2f}s > {MAX_EXPECTED_TIME}s (Possible timeout)")
+            logging.info("Attempt %d/%d: Connection from %s", attempt, retries, source_pod)
             
-            raise Exception("Retry-After test FAILED.")
+            # This returns the JSON body (stdout)
+            response_body, _ = run_command(cmd) 
 
-    except Exception as e:
-        logging.error(f"Test Execution Error: {e}")
-        raise
+            # CASE 1: Expecting Success (Sidecar -> Sidecar)
+            if expect_success:
+                logging.info("Connection succeeded. Verifying mTLS headers...")
+                
+                try:
+                    data = json.loads(response_body)
+                    headers = data.get("headers", {})
+                    
+                    # THE CRITICAL CHECK:
+                    # Envoy injects this header ONLY if mTLS handshake happened.
+                    xfcc = headers.get("X-Forwarded-Client-Cert") or headers.get("X-Forwarded-Client-Cert")
+                    
+                    if xfcc:
+                        logging.info("mTLS VERIFIED: Found 'X-Forwarded-Client-Cert' header.")
+                        return # Success!
+                    else:
+                        raise RuntimeError(
+                            f"SECURITY FAIL: Connection worked, but mTLS header is MISSING.\n"
+                            f"Response: {response_body}"
+                        )
+                except json.JSONDecodeError:
+                    raise RuntimeError(f"Failed to parse httpbin JSON response: {response_body}")
+
+            # CASE 2: Expecting Failure (No-Sidecar -> Sidecar)
+            else:
+                # If we got here, the connection SUCCEEDED, which is BAD for this test case.
+                raise RuntimeError(
+                    f"SECURITY FAIL: Traffic from {source_pod} (No-Sidecar) was ALLOWED but should be BLOCKED."
+                )
+
+        except subprocess.CalledProcessError as e:
+            # CASE 3: Connection Failed (Blocked)
+            if not expect_success:
+                logging.info(
+                    "Connection blocked as expected (Strict mTLS enforcement working).\n"
+                    "Pod: %s, Return Code: %s", source_pod, e.returncode
+                )
+                return # Success (we wanted it to fail)
+
+            # If we expected success but failed, verify retry
+            logging.warning("Connection failed (Attempt %d/%d). Retrying...", attempt, retries)
+            if attempt < retries:
+                time.sleep(delay)
+
+    # Final Failure for Expected Success
+    if expect_success:
+        raise RuntimeError(f"Connectivity Test FAILED: Could not connect from {source_pod}")
+
+def verify_istio_mtls():
+    """
+    Orchestrates the mTLS verification tests.
+    """
+    logging.info("--- Starting Istio mTLS Verification Tests ---")
     
-    finally:
-        logging.info("Cleaning up resources...")
-        # Add your cleanup logic here, e.g., deleting the applied YAMLs
-        # cleanup_manifests(...)
+    # 0. Deploy httpbin with Strict mTLS
+    logging.info("Deploying httpbin target with Strict mTLS...")
+    apply_yaml_template(HTTPBIN_TEMPLATE_PATH, TEST_NAMESPACE)
+    
+    # (Add logic here to wait for httpbin to be ready, similar to your wait command)
+    logging.info("Waiting for httpbin to be ready...")
+    run_command(f"kubectl wait --for=condition=Ready pod -l app={TARGET_APP_NAME} -n {TEST_NAMESPACE} --timeout=120s")
+
+    # 1. Test Authorized (Sidecar -> Sidecar)
+    # Assumes CLIENT_APP_NAME is already defined/deployed in your setup
+    logging.info("Test 1: Sidecar -> Sidecar (Should Pass + Have mTLS Header)")
+    check_connection(CLIENT_APP_NAME, expect_success=True)
+
+    # 2. Test Unauthorized (No-Sidecar -> Sidecar)
+    logging.info("Test 2: No-Sidecar -> Sidecar (Should be Blocked)")
+    
+    # Deploy your no-sidecar pod (same as your original logic)
+    apply_yaml_template(
+        NO_SIDECAR_TEMPLATE_PATH,
+        # ... your other args ...
+    )
+    # Wait for ready...
+    
+    check_connection(NO_SIDECAR_CLIENT_APP_NAME, expect_success=False)
+
+    logging.info("All Istio mTLS tests PASSED successfully.")
