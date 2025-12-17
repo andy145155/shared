@@ -1,33 +1,31 @@
-name: Ruff
-
-on:
-  push:
-    branches: ["main", "master"]
-  pull_request:
-    branches: ["main", "master"]
-
-jobs:
-  ruff:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # Step 1: Run Ruff Linter (Check for errors)
-      # Defaults to 'ruff check' which looks for logic/style errors.
-      - name: Ruff Check (Lint)
-        uses: astral-sh/ruff-action@v3
-        with:
-            # We pin the version to avoid breaking changes in CI. 
-            # It is best practice to keep this aligned with your local version.
-            version: "0.9.1"
-            # args: "check --output-format=github" # (The action does this automatically)
-
-      # Step 2: Run Ruff Formatter (Check for formatting compliance)
-      # We use 'format --check' so it fails if files are not formatted, 
-      # rather than auto-formatting them silently.
-      - name: Ruff Format (Style)
-        uses: astral-sh/ruff-action@v3
-        with:
-          version: "0.9.1"
-          args: "format --check"
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: retry-after-target-lua-injector
+  namespace: $TEST_NAMESPACE
+spec:
+  workloadSelector:
+    labels:
+      app: $TARGET_APP_NAME
+  configPatches:
+  - applyTo: HTTP_FILTER
+    match:
+      context: SIDECAR_INBOUND
+      listener:
+        filterChain:
+          filter:
+            name: "envoy.filters.network.http_connection_manager"
+    patch:
+      operation: INSERT_BEFORE
+      value:
+        name: envoy.lua
+        typed_config:
+          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+          inlineCode: |
+            function envoy_on_response(response_handle)
+              -- Check for 503 and inject the header using your variable
+              if response_handle:headers():get(":status") == "503" then
+                -- Note the quotes around the variable!
+                response_handle:headers():add("retry-after", "$RETRY_SECONDS")
+              end
+            end
