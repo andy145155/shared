@@ -1,44 +1,154 @@
-This PR introduces a new, comprehensive Python-based automation suite for verifying the health and security of the Istio service mesh.
+Here is the complete, standalone `README.md` file. You can copy and paste this directly into your repository.
 
-Instead of manual verification, this script automates the setup of test applications, validates the Control Plane status, and explicitly tests strict mTLS enforcement policies (allowing mesh-to-mesh traffic while blocking legacy-to-mesh traffic).
+---
 
-🚀 Key Features
-1. Control Plane Verification (verify_istio_control_plane)
-Deployment Status: verifies the istiod deployment is available and ready.
+# External-DNS Release Verifier
 
-Proxy Synchronization: Checks for STALE proxies using istioctl proxy-status with retry logic to handle transient sync delays.
+This tool provides automated "Black Box" verification for `external-dns` releases on EKS. It is designed to run as an **ArgoCD PostSync Job** in non-production environments (`ptdev`, `dev`, `stg`) to certify that a new version of `external-dns` is fully functional before it is promoted.
 
-Configuration Analysis: Runs istioctl analyze to detect potential validation issues in the cluster.
+## 🌊 Verification Logic Flowchart
 
-2. mTLS Security Testing (run_istio_mtls_tests)
-Implements a "Strict mTLS" validation suite that runs two specific connectivity scenarios:
+The following flowchart illustrates the decision logic for the verification process, including the specific handling of `upsert-only` environments to prevent "zombie" DNS records.
 
-✅ Allowed: Verifies that a mesh-enabled pod (Sidecar) can successfully communicate with another mesh-enabled pod.
+```mermaid
+flowchart TD
+    A[Start: PostSync Job Triggered] --> B{Check Version}
+    B -- Mismatch --> C[FAIL: Alert Version Mismatch]
+    B -- Match --> D[Step 1: Create Test Service]
+    
+    D --> E{Verify Route53 Creation}
+    E -- Timeout/Not Found --> F[FAIL: DNS Creation Failed]
+    E -- Found --> G[Step 2: Delete Test Service]
+    
+    G --> H{Is UPSERT_ONLY_MODE?}
+    
+    H -- NO (Standard Sync) --> I{Verify Route53 Deletion}
+    I -- Record Persists --> J[FAIL: DNS Deletion Failed]
+    I -- Record Gone --> K[SUCCESS: Full Lifecycle Verified]
+    
+    H -- YES (Upsert Only) --> L[Skip Deletion Verification]
+    L --> M[Step 3: Force Manual Cleanup via Boto3]
+    M --> N[SUCCESS: Creation Verified & Cleaned Up]
+    
+    style C fill:#ffcccc,stroke:#ff0000
+    style F fill:#ffcccc,stroke:#ff0000
+    style J fill:#ffcccc,stroke:#ff0000
+    style K fill:#ccffcc,stroke:#00aa00
+    style N fill:#ccffcc,stroke:#00aa00
 
-❌ Blocked: Verifies that a non-mesh pod (No-Sidecar/Legacy) is forbidden from communicating with a mesh-enabled pod.
+```
 
-Note: Includes logic to dynamically resolve Pod names via labels to ensure kubectl exec commands target the correct containers.
+## 📋 Overview
 
-3. Test Infrastructure (setup_test_apps)
-Automates the deployment of Client and Target test applications via YAML templates.
+This automation replaces manual "curl" or "dig" checks with a deterministic verification process. It handles the two primary operation modes of `external-dns`:
 
-Includes robust "Wait" logic to ensure Deployments and Pods are fully Ready before tests begin.
+1. **Sync Mode (e.g., `ptdev`):** Verifies the full lifecycle (**Create**  **Verify**  **Delete**  **Verify**). This proves `external-dns` can *add* and *remove* records.
+2. **Upsert-Only Mode (e.g., `stg`):** Verifies creation only. Since `external-dns` is forbidden from deleting records in these environments, the verifier creates the record, verifies it, and then **self-cleans** the Route53 record using the AWS API to prevent polluting the zone with test data.
 
-Verifies successful sidecar injection on targeted namespaces.
+## 🛠 Prerequisites
 
-⚙️ Configuration & Linting Updates
-Updated the Pylint configuration to align with Python PEP 8 standards and project requirements:
+### AWS Permissions (IRSA)
 
-Indentation: Changed from 2 spaces to 4 spaces for better readability.
+The Pod running this image requires an IAM Role (IRSA) with the following Route53 permissions.
 
-Rules: Disabled C0114 (Missing module docstring) to reduce noise in file headers.
+* **ListResourceRecordSets**: Required for verification.
+* **ChangeResourceRecordSets**: Required **only** if running in `UPSERT_ONLY_MODE` (to perform self-cleanup).
 
-🛡️ Error Handling
-Implemented a Fail-Fast architecture.
+### Kubernetes RBAC
 
-Replaced generic exceptions with specific subprocess.CalledProcessError handling for command failures and RuntimeError for logical verification failures.
+The Job needs a ServiceAccount with permissions to:
 
-Ensures specific exit codes are returned to CI/CD pipelines upon failure.
+* `create`, `get`, `delete` Services (to manage the test fixture).
+* `get`, `list` Pods (to verify the running `external-dns` version).
 
-🧪 Verification
-How to run locally:
+## ⚙️ Configuration
+
+The container is configured entirely via Environment Variables passed from your Helm Chart.
+
+| Variable | Description | Required | Default |
+| --- | --- | --- | --- |
+| `AWS_REGION` | AWS Region (e.g., `ap-east-1`). | ✅ | `ap-east-1` |
+| `HOSTED_ZONE_ID` | The Route53 Zone ID to test against. | ✅ | - |
+| `TEST_DOMAIN_NAME` | FQDN for the test record (e.g., `ver-test.dev.mox.com`). | ✅ | - |
+| `UPSERT_ONLY_MODE` | Set to `true` if the cluster forbids automatic deletions. | ❌ | `false` |
+| `EXPECTED_VERSION` | The image tag expected to be running (e.g., `v0.15.0`). | ❌ | `latest` |
+| `TARGET_NAMESPACE` | Namespace where the test Service is deployed. | ❌ | `af-toolkit` |
+
+## 🚀 Deployment Guide
+
+### 1. Build Image
+
+```bash
+docker build -t platform-docker-images/external-dns-verifier:v1.0.0 .
+
+```
+
+### 2. Helm Integration (ArgoCD)
+
+Add this Job to your `af-toolkit` or `external-dns` Helm chart template.
+
+**Example: `templates/verification-job.yaml**`
+
+```yaml
+{{- if .Values.verification.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: external-dns-verifier
+  namespace: {{ .Values.verification.namespace | default "af-toolkit" }}
+  annotations:
+    # Runs AFTER the new external-dns pods are healthy
+    argocd.argoproj.io/hook: PostSync
+    # Deletes the Job on success to keep the cluster clean
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: external-dns-verifier-sa
+      restartPolicy: Never
+      containers:
+      - name: verifier
+        image: {{ .Values.verification.image }}
+        env:
+        - name: HOSTED_ZONE_ID
+          value: {{ .Values.verification.hostedZoneId | quote }}
+        - name: TEST_DOMAIN_NAME
+          value: "ext-dns-verify-{{ .Values.cluster.name }}.dev.mox.com"
+        - name: EXPECTED_VERSION
+          value: {{ .Values.image.tag | quote }}
+        # Set this to true for STG if STG uses upsert-only policy
+        - name: UPSERT_ONLY_MODE
+          value: {{ .Values.verification.upsertOnly | default "false" | quote }}
+{{- end }}
+
+```
+
+## 🛡 Safety Mechanisms
+
+1. **Prefix Lock:** The verification script includes a safety lock. It will **refuse** to perform manual cleanup on any domain that does not start with specific prefixes (e.g., `ext-dns-`, `ver-test`), preventing accidental deletion of production records if the configuration is incorrect.
+2. **Self-Cleanup:** If the test fails in `ptdev` (Sync Mode), the script attempts to clean up the Kubernetes Service to avoid leaving orphan resources in the cluster.
+
+## 🚨 Troubleshooting
+
+If the verification Job fails, the ArgoCD sync will be marked as Failed.
+
+**Steps to resolve:**
+
+1. **Check Job Logs:**
+```bash
+kubectl logs job/external-dns-verifier -n af-toolkit
+
+```
+
+
+2. **Manual Cleanup (K8s):**
+If the script crashed before cleanup, remove the test service:
+```bash
+kubectl delete svc external-dns-test-service -n af-toolkit
+
+```
+
+
+3. **Manual Cleanup (Route53):**
+If the script failed to delete the DNS record, manually remove the `TEST_DOMAIN_NAME` record via AWS Console or CLI.
