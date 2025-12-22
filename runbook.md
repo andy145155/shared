@@ -1,82 +1,44 @@
-Here is the complete, standalone `README.md` file. You can copy and paste this directly into your repository.
+Here are the updated files. I have optimized the flowchart colors for high contrast (Dark Mode friendly) and added the **Pre-Flight Cleanup** and **SIGTERM** safety handlers to the Python script.
 
----
+### 1. Updated `README.md`
 
+I replaced the specific hex colors in the mermaid diagram with high-contrast classes (`classDef`) that are readable in both light and dark modes.
+
+```markdown
 # External-DNS Release Verifier
 
-This tool provides automated "Black Box" verification for `external-dns` releases on EKS. It is designed to run as an **ArgoCD PostSync Job** in non-production environments (`ptdev`, `dev`, `stg`) to certify that a new version of `external-dns` is fully functional before it is promoted.
+This tool provides automated "Black Box" verification for `external-dns` releases on EKS. It runs as an **ArgoCD PostSync Job** to certify that a new version of `external-dns` is fully functional before the release is considered successful.
 
-## 🌊 Verification Logic Flowchart
+## 🏗 Architecture
 
-The following flowchart illustrates the decision logic for the verification process, including the specific handling of `upsert-only` environments to prevent "zombie" DNS records.
+The verification process involves three distinct namespaces to ensure isolation.
 
 ```mermaid
 flowchart TD
-    A[Start: PostSync Job Triggered] --> B{Check Version}
-    B -- Mismatch --> C[FAIL: Alert Version Mismatch]
-    B -- Match --> D[Step 1: Create Test Service]
-    
-    D --> E{Verify Route53 Creation}
-    E -- Timeout/Not Found --> F[FAIL: DNS Creation Failed]
-    E -- Found --> G[Step 2: Delete Test Service]
-    
-    G --> H{Is UPSERT_ONLY_MODE?}
-    
-    H -- NO (Standard Sync) --> I{Verify Route53 Deletion}
-    I -- Record Persists --> J[FAIL: DNS Deletion Failed]
-    I -- Record Gone --> K[SUCCESS: Full Lifecycle Verified]
-    
-    H -- YES (Upsert Only) --> L[Skip Deletion Verification]
-    L --> M[Step 3: Force Manual Cleanup via Boto3]
-    M --> N[SUCCESS: Creation Verified & Cleaned Up]
-    
-    style C fill:#ffcccc,stroke:#ff0000
-    style F fill:#ffcccc,stroke:#ff0000
-    style J fill:#ffcccc,stroke:#ff0000
-    style K fill:#ccffcc,stroke:#00aa00
-    style N fill:#ccffcc,stroke:#00aa00
+    %% Define Styles for Dark/Light Mode Compatibility
+    classDef plain fill:#fff,stroke:#333,stroke-width:1px,color:#000;
+    classDef k8s fill:#326ce5,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef aws fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:#000;
+    classDef flow fill:#f9f9f9,stroke:#333,stroke-width:1px,color:#000;
 
-```
-
-## 📋 Overview
-
-This automation replaces manual "curl" or "dig" checks with a deterministic verification process. It handles the two primary operation modes of `external-dns`:
-
-1. **Sync Mode (e.g., `ptdev`):** Verifies the full lifecycle (**Create**  **Verify**  **Delete**  **Verify**). This proves `external-dns` can *add* and *remove* records.
-2. **Upsert-Only Mode (e.g., `stg`):** Verifies creation only. Since `external-dns` is forbidden from deleting records in these environments, the verifier creates the record, verifies it, and then **self-cleans** the Route53 record using the AWS API to prevent polluting the zone with test data.
-
-## 🛠 Prerequisites
-Here is the updated **README.md** reflecting your specific cross-namespace architecture (`external-dns` App  `af-toolkit` Job  `verification-external-dns` Resource).
-
----
-
-# External-DNS Release Verifier
-
-This tool provides automated "Black Box" verification for `external-dns` releases on EKS. It is designed to run as an **ArgoCD PostSync Job** to certify that a new version of `external-dns` is fully functional before the release is considered successful.
-
-## 🏗 Architecture & Design
-
-The verification process involves three distinct namespaces to ensure isolation and security.
-
-```mermaid
-flowchart TD
     subgraph K8s_Cluster [EKS Cluster]
+        direction TB
         subgraph NS_ExtDNS [Namespace: external-dns]
-            Controller[External-DNS Pod]
+            Controller[External-DNS Pod]:::k8s
         end
         
         subgraph NS_Toolkit [Namespace: af-toolkit]
-            Job[Verifier Job]
-            SA[ServiceAccount]
+            Job[Verifier Job]:::k8s
+            SA[ServiceAccount]:::plain
         end
         
         subgraph NS_Verify [Namespace: verification-external-dns]
-            TestSvc[Test Service<br>external-dns-test]
+            TestSvc[Test Service<br>external-dns-test]:::k8s
         end
     end
     
     subgraph AWS [AWS Cloud]
-        R53[Route53 API]
+        R53[Route53 API]:::aws
     end
 
     %% Flows
@@ -84,58 +46,44 @@ flowchart TD
     Controller -- "2. Watch Service" --> TestSvc
     Controller -- "3. Create Record" --> R53
     Job -- "4. Poll/Verify" --> R53
-    
-    %% Styles
-    style Job fill:#ccf,stroke:#333
-    style TestSvc fill:#cfc,stroke:#333
-    style R53 fill:#f9f,stroke:#333
 
 ```
-
-### Workflow
-
-1. **Trigger:** ArgoCD syncs `external-dns` and triggers the PostSync Job in `af-toolkit`.
-2. **Execution:** The Job uses a ServiceAccount in `af-toolkit` to create a `Service` in the `verification-external-dns` namespace.
-3. **Validation:** The script polls AWS Route53 to confirm `external-dns` successfully propagated the record.
-4. **Cleanup:**
-* **Sync Mode (PTDEV):** Deletes the Service and verifies Route53 record removal.
-* **Upsert Mode (STG):** Verifies creation, then performs a "Self-Cleanup" of the Route53 record via Boto3 (bypassing the controller).
-
-
-
----
 
 ## 🌊 Verification Logic
 
+This flowchart illustrates the decision logic, including the **Pre-Flight Check** and **Signal Handling** to ensure environment hygiene.
+
 ```mermaid
 flowchart TD
-    A[Start: PostSync Job Triggered] --> B{Check Version}
-    B -- Mismatch --> C[FAIL: Alert Version Mismatch]
-    B -- Match --> D[Step 1: Create Test Service<br>in 'verification-external-dns']
+    %% High Contrast Styles
+    classDef success fill:#28a745,stroke:#000,stroke-width:1px,color:#fff;
+    classDef fail fill:#dc3545,stroke:#000,stroke-width:1px,color:#fff;
+    classDef process fill:#007bff,stroke:#000,stroke-width:1px,color:#fff;
+    classDef decision fill:#ffc107,stroke:#000,stroke-width:1px,color:#000;
+
+    A([Start: PostSync Job Triggered]) --> B{Check Version}
+    B -- Mismatch --> C[FAIL: Alert Version Mismatch]:::fail
+    B -- Match --> D[Step 0: Pre-Flight Cleanup]:::process
     
-    D --> E{Verify Route53 Creation}
-    E -- Timeout/Not Found --> F[FAIL: DNS Creation Failed]
-    E -- Found --> G[Step 2: Delete Test Service]
+    D --> D1{Record Exists?}:::decision
+    D1 -- Yes --> D2[Force Delete via Boto3]:::process
+    D1 -- No --> E[Step 1: Create Test Service]:::process
+    D2 --> E
+
+    E --> F{Verify Creation}:::decision
+    F -- Timeout --> G[FAIL: Creation Failed]:::fail
+    F -- Found --> H[Step 2: Delete Test Service]:::process
     
-    G --> H{Is UPSERT_ONLY_MODE?}
+    H --> I{Is UPSERT_ONLY?}:::decision
     
-    H -- NO (Standard Sync) --> I{Verify Route53 Deletion}
-    I -- Record Persists --> J[FAIL: DNS Deletion Failed]
-    I -- Record Gone --> K[SUCCESS: Full Lifecycle Verified]
+    I -- NO (Standard) --> J{Verify Deletion}:::decision
+    J -- Record Persists --> K[FAIL: Deletion Failed]:::fail
+    J -- Record Gone --> L([SUCCESS]):::success
     
-    H -- YES (Upsert Only) --> L[Skip Deletion Verification]
-    L --> M[Step 3: Force Manual Cleanup via Boto3]
-    M --> N[SUCCESS: Creation Verified & Cleaned Up]
-    
-    style C fill:#ffcccc,stroke:#ff0000
-    style F fill:#ffcccc,stroke:#ff0000
-    style J fill:#ffcccc,stroke:#ff0000
-    style K fill:#ccffcc,stroke:#00aa00
-    style N fill:#ccffcc,stroke:#00aa00
+    I -- YES (Stg) --> M[Step 3: Self-Cleanup via Boto3]:::process
+    M --> N([SUCCESS]):::success
 
 ```
-
----
 
 ## 🛠 Prerequisites & RBAC
 
@@ -245,165 +193,231 @@ spec:
 
 ```
 
-### 2. ArgoCD Application Config
+## 🛡 Safety Mechanisms
 
-Update your `external-dns` Application to include the source and inject the Zone ID.
-
-```yaml
-spec:
-  sources:
-    - repoURL: https://kubernetes-sigs.github.io/external-dns
-      chart: external-dns
-      targetRevision: 1.14.0
-    - repoURL: https://github.com/your-org/platform-charts.git
-      path: apps/external-dns-verifier
-      helm:
-        values: |
-          hostedZoneId: {{ index .Values.cluster.zoneIdMap .Values.cluster.name }}
-          testDomainName: "ext-dns-verify-{{ .Values.cluster.name }}.dev.mox.com"
-          upsertOnly: {{ if eq .Values.cluster.env "stg" }}true{{ else }}false{{ end }}
+1. **Pre-Flight Cleanup:** Before starting, the script checks if the test DNS record already exists (from a previous failed run) and forcibly removes it to ensure a clean test state.
+2. **Graceful Shutdown:** The script catches `SIGTERM` signals (e.g., if the job is cancelled) and attempts to clean up the Kubernetes Service and Route53 record immediately.
+3. **Prefix Lock:** The script will **REFUSE** to perform manual cleanup on any domain that does not start with `ext-dns-`, `ver-test`, or `canary`.
 
 ```
 
 ---
 
-## 🛡 Safety & Troubleshooting
+### 2. Updated Python Script (`verifier.py`)
 
-### Safety Locks
+This version includes `signal` handling for graceful exits and the `ensure_clean_slate` function.
 
-* **Prefix Check:** The script will **REFUSE** to perform manual cleanup if the domain name does not start with `ext-dns-`, `ver-test`, or `canary`.
-* **Timeout:** The job fails after 5 minutes (300s) to prevent indefinite hanging.
+```python
+import os
+import time
+import signal
+import sys
+import subprocess
+import boto3
+from kubernetes import client, config
+from botocore.exceptions import ClientError
 
-### Troubleshooting Steps
+# --- CONFIGURATION ---
+AWS_REGION = os.environ.get("AWS_REGION", "ap-east-1")
+ZONE_ID = os.environ.get("HOSTED_ZONE_ID")
+DNS_NAME = os.environ.get("TEST_DOMAIN_NAME")
+EXPECTED_VERSION = os.environ.get("EXPECTED_VERSION")
+UPSERT_ONLY_MODE = os.environ.get("UPSERT_ONLY_MODE", "false").lower() == "true"
+TARGET_NAMESPACE = os.environ.get("TARGET_NAMESPACE", "verification-external-dns")
+TIMEOUT_SECONDS = 300
+POLL_INTERVAL = 10
 
-If the PostSync hook fails:
+# Helper to prevent accidents
+ALLOWED_PREFIXES = ["ext-dns-", "ver-test", "canary", "test-"]
 
-1. **View Logs:**
-```bash
-kubectl logs job/external-dns-verifier -n af-toolkit
-
-```
-
-
-2. **Check Test Resource:**
-```bash
-kubectl get svc -n verification-external-dns
-
-```
-
-
-* *If Service exists but DNS is missing:* `external-dns` controller is likely broken or permissions are missing.
-* *If Service is missing:* The Job failed to create it (check RBAC).
-
-
-3. **Manual Cleanup:**
-If the script crashed hard, you may need to manually delete the service:
-```bash
-kubectl delete svc external-dns-test-service -n verification-external-dns
-
-```
-### AWS Permissions (IRSA)
-
-The Pod running this image requires an IAM Role (IRSA) with the following Route53 permissions.
-
-* **ListResourceRecordSets**: Required for verification.
-* **ChangeResourceRecordSets**: Required **only** if running in `UPSERT_ONLY_MODE` (to perform self-cleanup).
-
-### Kubernetes RBAC
-
-The Job needs a ServiceAccount with permissions to:
-
-* `create`, `get`, `delete` Services (to manage the test fixture).
-* `get`, `list` Pods (to verify the running `external-dns` version).
-
-## ⚙️ Configuration
-
-The container is configured entirely via Environment Variables passed from your Helm Chart.
-
-| Variable | Description | Required | Default |
-| --- | --- | --- | --- |
-| `AWS_REGION` | AWS Region (e.g., `ap-east-1`). | ✅ | `ap-east-1` |
-| `HOSTED_ZONE_ID` | The Route53 Zone ID to test against. | ✅ | - |
-| `TEST_DOMAIN_NAME` | FQDN for the test record (e.g., `ver-test.dev.mox.com`). | ✅ | - |
-| `UPSERT_ONLY_MODE` | Set to `true` if the cluster forbids automatic deletions. | ❌ | `false` |
-| `EXPECTED_VERSION` | The image tag expected to be running (e.g., `v0.15.0`). | ❌ | `latest` |
-| `TARGET_NAMESPACE` | Namespace where the test Service is deployed. | ❌ | `af-toolkit` |
-
-## 🚀 Deployment Guide
-
-### 1. Build Image
-
-```bash
-docker build -t platform-docker-images/external-dns-verifier:v1.0.0 .
-
-```
-
-### 2. Helm Integration (ArgoCD)
-
-Add this Job to your `af-toolkit` or `external-dns` Helm chart template.
-
-**Example: `templates/verification-job.yaml**`
-
-```yaml
-{{- if .Values.verification.enabled }}
-apiVersion: batch/v1
-kind: Job
+# Definition of the test service
+TEST_SERVICE_MANIFEST = f"""
+apiVersion: v1
+kind: Service
 metadata:
-  name: external-dns-verifier
-  namespace: {{ .Values.verification.namespace | default "af-toolkit" }}
+  name: external-dns-test-service
+  namespace: {TARGET_NAMESPACE}
   annotations:
-    # Runs AFTER the new external-dns pods are healthy
-    argocd.argoproj.io/hook: PostSync
-    # Deletes the Job on success to keep the cluster clean
-    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    external-dns.alpha.kubernetes.io/hostname: {DNS_NAME}
 spec:
-  backoffLimit: 0
-  template:
-    spec:
-      serviceAccountName: external-dns-verifier-sa
-      restartPolicy: Never
-      containers:
-      - name: verifier
-        image: {{ .Values.verification.image }}
-        env:
-        - name: HOSTED_ZONE_ID
-          value: {{ .Values.verification.hostedZoneId | quote }}
-        - name: TEST_DOMAIN_NAME
-          value: "ext-dns-verify-{{ .Values.cluster.name }}.dev.mox.com"
-        - name: EXPECTED_VERSION
-          value: {{ .Values.image.tag | quote }}
-        # Set this to true for STG if STG uses upsert-only policy
-        - name: UPSERT_ONLY_MODE
-          value: {{ .Values.verification.upsertOnly | default "false" | quote }}
-{{- end }}
+  selector:
+    app: external-dns-test
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+  type: LoadBalancer
+"""
+
+def handle_exit(signum, frame):
+    """Catches SIGTERM/SIGINT to ensure cleanup happens if job is killed."""
+    print(f"\n🛑 Received signal {signum}. Aborting and cleaning up...")
+    try:
+        delete_k8s_manifest()
+        force_cleanup_route53(silent=True)
+    except:
+        pass # Best effort
+    sys.exit(1)
+
+# Register signals
+signal.signal(signal.SIGTERM, handle_exit)
+signal.signal(signal.SIGINT, handle_exit)
+
+def verify_version_match():
+    if not EXPECTED_VERSION or EXPECTED_VERSION == "latest":
+        print("ℹ️  Skipping version check.")
+        return
+
+    print(f"🔍 Verifying version matches: {EXPECTED_VERSION}...")
+    try:
+        config.load_incluster_config()
+    except:
+        config.load_kube_config()
+        
+    v1 = client.CoreV1Api()
+    pods = v1.list_pod_for_all_namespaces(label_selector="app.kubernetes.io/name=external-dns")
+    
+    if not pods.items:
+        print("⚠️  Warning: No external-dns pods found.")
+        return
+
+    for pod in pods.items:
+        # Assumes container 0 is the app
+        image = pod.spec.containers[0].image
+        tag = image.split(':')[-1]
+        
+        if tag != EXPECTED_VERSION:
+            print(f"❌ Version Mismatch! Pod {pod.metadata.name} is running '{tag}', expected '{EXPECTED_VERSION}'.")
+            exit(1)
+            
+    print(f"✅ Version verified: {EXPECTED_VERSION}")
+
+def get_route53_record(r53_client):
+    try:
+        response = r53_client.list_resource_record_sets(
+            HostedZoneId=ZONE_ID,
+            StartRecordName=DNS_NAME,
+            MaxItems='1'
+        )
+        records = response.get('ResourceRecordSets', [])
+        if records and records[0]['Name'].rstrip('.') == DNS_NAME.rstrip('.'):
+            return records[0]
+        return None
+    except ClientError as e:
+        print(f"AWS Error: {e}")
+        return None
+
+def force_cleanup_route53(silent=False):
+    """Manual cleanup using Boto3."""
+    if not silent:
+        print(f"🧹 Boto3: Checking for {DNS_NAME} to clean up...")
+    
+    # SAFETY LOCK
+    if not any(DNS_NAME.startswith(p) for p in ALLOWED_PREFIXES):
+        print(f"⛔ SAFETY STOP: Domain {DNS_NAME} invalid. Skipping.")
+        return
+
+    r53 = boto3.client('route53', region_name=AWS_REGION)
+    target_record = get_route53_record(r53)
+    
+    if not target_record:
+        if not silent: print("✅ Record already clean.")
+        return
+
+    change_batch = {
+        'Changes': [{'Action': 'DELETE', 'ResourceRecordSet': target_record}]
+    }
+
+    try:
+        r53.change_resource_record_sets(HostedZoneId=ZONE_ID, ChangeBatch=change_batch)
+        print("✅ Manual cleanup successful.")
+    except Exception as e:
+        print(f"❌ Failed to cleanup: {e}")
+
+def ensure_clean_slate():
+    """Pre-flight check to ensure the test record doesn't already exist."""
+    print("🛫 Performing Pre-Flight Cleanup...")
+    # 1. Clean K8s just in case
+    delete_k8s_manifest()
+    # 2. Clean Route53
+    force_cleanup_route53()
+    print("✅ Environment is clean. Starting test.")
+
+def wait_for_record_state(should_exist: bool):
+    r53 = boto3.client('route53', region_name=AWS_REGION)
+    start = time.time()
+    action = "creation" if should_exist else "deletion"
+    print(f"⏳ Waiting for DNS {action}...")
+
+    while time.time() - start < TIMEOUT_SECONDS:
+        record = get_route53_record(r53)
+        exists = record is not None
+        
+        if should_exist and exists:
+            print(f"✅ Success: Record found in Route53.")
+            return True
+        elif not should_exist and not exists:
+            print(f"✅ Success: Record removed from Route53.")
+            return True
+        time.sleep(POLL_INTERVAL)
+    
+    print(f"❌ Timed out waiting for {action}.")
+    return False
+
+def apply_k8s_manifest():
+    with open("test-service.yaml", "w") as f:
+        f.write(TEST_SERVICE_MANIFEST)
+    print(f"🚀 Creating Service in namespace: {TARGET_NAMESPACE}...")
+    subprocess.run(["kubectl", "apply", "-f", "test-service.yaml"], check=True)
+
+def delete_k8s_manifest():
+    # Helper to delete silently without crashing if not found
+    subprocess.run(
+        ["kubectl", "delete", "-f", "test-service.yaml", "--ignore-not-found"], 
+        check=False, 
+        stdout=subprocess.DEVNULL, 
+        stderr=subprocess.DEVNULL
+    )
+
+def run():
+    if not ZONE_ID or not DNS_NAME:
+        print("❌ Error: Missing HOSTED_ZONE_ID or TEST_DOMAIN_NAME.")
+        exit(1)
+
+    verify_version_match()
+    ensure_clean_slate()
+
+    # 1. Create
+    try:
+        apply_k8s_manifest()
+    except subprocess.CalledProcessError:
+        print("❌ Failed to apply Kubernetes manifest.")
+        exit(1)
+
+    # 2. Verify Creation
+    if not wait_for_record_state(should_exist=True):
+        print("🚨 Creation Verification Failed.")
+        delete_k8s_manifest()
+        exit(1)
+
+    # 3. Delete K8s Resource
+    print(f"🗑️  Deleting Service from namespace: {TARGET_NAMESPACE}...")
+    subprocess.run(["kubectl", "delete", "-f", "test-service.yaml"], check=True)
+
+    # 4. Final Verify / Cleanup
+    if UPSERT_ONLY_MODE:
+        print("ℹ️  Upsert-Only Mode: Skipping auto-deletion check.")
+        force_cleanup_route53()
+    else:
+        if not wait_for_record_state(should_exist=False):
+            print("🚨 Deletion Verification Failed (Zombie Record).")
+            # Attempt cleanup before failing
+            force_cleanup_route53()
+            exit(1)
+
+    print("🎉 Verification Cycle Passed!")
+
+if __name__ == "__main__":
+    run()
 
 ```
-
-## 🛡 Safety Mechanisms
-
-1. **Prefix Lock:** The verification script includes a safety lock. It will **refuse** to perform manual cleanup on any domain that does not start with specific prefixes (e.g., `ext-dns-`, `ver-test`), preventing accidental deletion of production records if the configuration is incorrect.
-2. **Self-Cleanup:** If the test fails in `ptdev` (Sync Mode), the script attempts to clean up the Kubernetes Service to avoid leaving orphan resources in the cluster.
-
-## 🚨 Troubleshooting
-
-If the verification Job fails, the ArgoCD sync will be marked as Failed.
-
-**Steps to resolve:**
-
-1. **Check Job Logs:**
-```bash
-kubectl logs job/external-dns-verifier -n af-toolkit
-
-```
-
-
-2. **Manual Cleanup (K8s):**
-If the script crashed before cleanup, remove the test service:
-```bash
-kubectl delete svc external-dns-test-service -n af-toolkit
-
-```
-
-
-3. **Manual Cleanup (Route53):**
-If the script failed to delete the DNS record, manually remove the `TEST_DOMAIN_NAME` record via AWS Console or CLI.
