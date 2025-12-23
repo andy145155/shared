@@ -1,52 +1,41 @@
-sources:
-    # --- SOURCE 1: Official Chart (Same as before) ---
-    - repoURL: https://kubernetes-sigs.github.io/external-dns
-      chart: external-dns
-      targetRevision: {{ $values.chartVersion }}
-      plugin:
-        name: mox
+{{/* Verification Job Template
+Usage: include "baseline.verificationJob" (dict "appName" "external-dns" "image" "my-image:tag" "command" "verify.sh") 
+*/}}
+{{- define "baseline.verificationJob" -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .appName }}-verification
+  namespace: af-toolkit  # Forces the job to run in the toolkit namespace
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  template:
+    spec:
+      serviceAccountName: {{ .appName }}-verifier-sa
+      restartPolicy: Never
+      containers:
+      - name: verifier
+        image: {{ .image }}
+        command: ["/bin/sh", "-c"]
+        args: ["{{ .command }}"]
         env:
-          - name: helm
-            value: |
-              releaseName: {{ $app.name }}
-              values:
-                # ... (Keep your existing External DNS values here) ...
-                image:
-                  repository: ...
-                provider: aws
-                # ...
+        - name: TARGET_NAMESPACE
+          value: verification-{{ .appName }}
+{{- end -}}
 
-    # --- SOURCE 2: The Verifier Job (The "Spark Way") ---
-    # Spark uses the 'raw' plugin for sidecars. We will do the same.
-    - repoURL: https://github.com/ProjectDrgn/argocd-apps
-      path: apps/af-toolkit # We just need a valid path, it doesn't matter much for 'raw'
-      targetRevision: HEAD
-      plugin:
-        name: raw-yaml  # Or 'raw' - check your apps.yaml line 106 to confirm the name
-        env:
-          - name: yaml
-            value: |
-              apiVersion: batch/v1
-              kind: Job
-              metadata:
-                name: external-dns-verifier
-                namespace: af-toolkit
-                annotations:
-                  argocd.argoproj.io/hook: PostSync
-                  argocd.argoproj.io/hook-delete-policy: HookSucceeded
-              spec:
-                template:
-                  spec:
-                    serviceAccountName: external-dns-verifier-sa
-                    restartPolicy: Never
-                    containers:
-                    - name: verifier
-                      image: platform-docker-images/external-dns-verifier:v1.0.0
-                      env:
-                      # We can inject values here because this block is templated!
-                      - name: HOSTED_ZONE_ID
-                        value: {{ $.Values.mox.cluster.dnsZones.base | quote }}
-                      - name: TEST_DOMAIN_NAME
-                        value: "ver-test.{{ $.Values.mox.cluster.domain.base }}"
-                      - name: TARGET_NAMESPACE
-                        value: "verification-external-dns"
+
+# ... existing content ...
+    env:
+      - name: AWS_DEFAULT_REGION
+        value: {{ .Values.mox.cluster.region }}
+      
+      # INJECT VERIFICATION JOB HERE
+      - name: yaml
+        value: |
+          {{- include "baseline.verificationJob" (dict 
+              "appName" "external-dns" 
+              "image" "platform-docker-images/external-dns-verifier:v1.0.0" 
+              "command" "./verify-dns.sh"
+          ) | nindent 10 }}
