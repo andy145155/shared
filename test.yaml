@@ -1,31 +1,64 @@
-apiVersion: networking.istio.io/v1alpha3
-kind: EnvoyFilter
+# 1. ServiceAccount (The Identity)
+apiVersion: v1
+kind: ServiceAccount
 metadata:
-  name: retry-after-target-lua-injector
-  namespace: $TEST_NAMESPACE
+  name: external-dns-verifier-sa
+  namespace: af-toolkit # Must match where the Job runs
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+
+---
+# 2. ClusterRole / Role (The Permissions)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: external-dns-verifier-role
+  # NOTE: This Namespace must be where the permissions are NEEDED (target)
+  namespace: {{ .Values.targetNamespace }} 
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "delete", "list"]
+
+---
+# 3. RoleBinding (Connecting Identity to Permissions)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: external-dns-verifier-binding
+  namespace: {{ .Values.targetNamespace }}
+subjects:
+  - kind: ServiceAccount
+    name: external-dns-verifier-sa
+    namespace: af-toolkit # Where the SA lives
+roleRef:
+  kind: Role
+  name: external-dns-verifier-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# 4. The Job (The Workload)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: external-dns-verifier
+  namespace: af-toolkit
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
 spec:
-  workloadSelector:
-    labels:
-      app: $TARGET_APP_NAME
-  configPatches:
-  - applyTo: HTTP_FILTER
-    match:
-      context: SIDECAR_INBOUND
-      listener:
-        filterChain:
-          filter:
-            name: "envoy.filters.network.http_connection_manager"
-    patch:
-      operation: INSERT_BEFORE
-      value:
-        name: envoy.lua
-        typed_config:
-          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
-          inlineCode: |
-            function envoy_on_response(response_handle)
-              -- Check for 503 and inject the header using your variable
-              if response_handle:headers():get(":status") == "503" then
-                -- Note the quotes around the variable!
-                response_handle:headers():add("retry-after", "$RETRY_SECONDS")
-              end
-            end
+  template:
+    spec:
+      serviceAccountName: external-dns-verifier-sa
+      restartPolicy: Never
+      containers:
+      - name: verifier
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        env:
+        - name: TARGET_NAMESPACE
+          value: {{ .Values.targetNamespace | quote }}
+        - name: HOSTED_ZONE_ID
+          value: {{ .Values.hostedZoneId | quote }}
+        - name: TEST_DOMAIN_NAME
+          value: {{ .Values.testDomainName | quote }}
