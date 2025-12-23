@@ -1,41 +1,17 @@
-{{/* Verification Job Template
-Usage: include "baseline.verificationJob" (dict "appName" "external-dns" "image" "my-image:tag" "command" "verify.sh") 
-*/}}
-{{- define "baseline.verificationJob" -}}
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: {{ .appName }}-verification
-  namespace: af-toolkit  # Forces the job to run in the toolkit namespace
-  annotations:
-    argocd.argoproj.io/hook: PostSync
-    argocd.argoproj.io/hook-delete-policy: HookSucceeded
-spec:
-  template:
-    spec:
-      serviceAccountName: {{ .appName }}-verifier-sa
-      restartPolicy: Never
-      containers:
-      - name: verifier
-        image: {{ .image }}
-        command: ["/bin/sh", "-c"]
-        args: ["{{ .command }}"]
-        env:
-        - name: TARGET_NAMESPACE
-          value: verification-{{ .appName }}
-{{- end -}}
-
-
-# ... existing content ...
-    env:
-      - name: AWS_DEFAULT_REGION
-        value: {{ .Values.mox.cluster.region }}
-      
-      # INJECT VERIFICATION JOB HERE
-      - name: yaml
-        value: |
-          {{- include "baseline.verificationJob" (dict 
-              "appName" "external-dns" 
-              "image" "platform-docker-images/external-dns-verifier:v1.0.0" 
-              "command" "./verify-dns.sh"
-          ) | nindent 10 }}
+- name: raw
+      value: |
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: debug-job-test
+          namespace: af-toolkit
+          annotations:
+            argocd.argoproj.io/hook: PostSync
+        spec:
+          template:
+            spec:
+              containers:
+              - name: test
+                image: alpine
+                command: ["echo", "hello"]
+              restartPolicy: Never
