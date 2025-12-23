@@ -1,64 +1,117 @@
-# 1. ServiceAccount (The Identity)
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: external-dns-verifier-sa
-  namespace: af-toolkit # Must match where the Job runs
-  annotations:
-    argocd.argoproj.io/hook: PostSync
-    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+{{- $app := index (include "apps" $ | fromYaml) "external-dns" }}
+{{- $values := $app.source.helm.values }}
 
+{{- if $app.enabled }}
 ---
-# 2. ClusterRole / Role (The Permissions)
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+apiVersion: argoproj.io/v1alpha1
+kind: Application
 metadata:
-  name: external-dns-verifier-role
-  # NOTE: This Namespace must be where the permissions are NEEDED (target)
-  namespace: {{ .Values.targetNamespace }} 
-rules:
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["create", "get", "delete", "list"]
-
----
-# 3. RoleBinding (Connecting Identity to Permissions)
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: external-dns-verifier-binding
-  namespace: {{ .Values.targetNamespace }}
-subjects:
-  - kind: ServiceAccount
-    name: external-dns-verifier-sa
-    namespace: af-toolkit # Where the SA lives
-roleRef:
-  kind: Role
-  name: external-dns-verifier-role
-  apiGroup: rbac.authorization.k8s.io
-
----
-# 4. The Job (The Workload)
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: external-dns-verifier
-  namespace: af-toolkit
-  annotations:
-    argocd.argoproj.io/hook: PostSync
-    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+  name: {{ $.Values.mox.cluster.name }}-{{ $app.name }}
+  labels:
+    cluster: {{ $.Values.mox.cluster.name }}
+    env: {{ $.Values.mox.cluster.env }}
+    type: {{ $.Values.mox.cluster.type }}
+    app: {{ $app.name }}
+    instance: {{ $app.name }}
+    part-of: baseline
+    subset: app
 spec:
-  template:
-    spec:
-      serviceAccountName: external-dns-verifier-sa
-      restartPolicy: Never
-      containers:
-      - name: verifier
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+  project: {{ $.Values.mox.cluster.name }}-{{ $app.name }}
+  destination:
+    name: {{ $.Values.mox.cluster.name }}
+    namespace: {{ $app.namespace.name }}
+  
+  # --- CHANGED: Using Multiple Sources ---
+  sources:
+    # Source 1: The Official Upstream Chart
+    - repoURL: https://kubernetes-sigs.github.io/{{ $app.name }}
+      chart: {{ $app.name }}
+      targetRevision: {{ $values.chartVersion }}
+      plugin:
+        name: mox
         env:
-        - name: TARGET_NAMESPACE
-          value: {{ .Values.targetNamespace | quote }}
-        - name: HOSTED_ZONE_ID
-          value: {{ .Values.hostedZoneId | quote }}
-        - name: TEST_DOMAIN_NAME
-          value: {{ .Values.testDomainName | quote }}
+          - name: helm
+            value: |
+              releaseName: {{ $app.name }}
+              values:
+                image:
+                  repository: 030558737998.dkr.ecr.ap-east-1.amazonaws.com/{{ $app.name }}
+                  tag: v{{ $values.imageVersion }}{{ $values.imageTagSuffix }}
+
+                serviceAccount:
+                  create: false
+                  {{- if has $.Values.mox.cluster.type (list "integrations") }}
+                  name: external-dns-public
+                  {{- else }}
+                  name: external-dns
+                  {{- end }}
+
+                resources:
+                  requests:
+                    memory: 100Mi
+                    cpu: 10m
+                  limits:
+                    cpu: 50m
+                    memory: 150Mi
+                
+                logLevel: error
+                interval: 60s
+                
+                sources:
+                  {{- if has $.Values.mox.cluster.type (list "aiden" "apps" "forgerock" "keycloak" "iaspec" "tm-vault" "vault") }}
+                  - istio-gateway
+                  {{- else if has $.Values.mox.cluster.type (list "crossenv" "cybsecops" "frontend") }}
+                  - service
+                  - ingress
+                  {{- else }}
+                  - service
+                  {{- end }}
+
+                # TODO: proper owner id
+                {{- if (has $.Values.mox.cluster.type (list "frontend")) }}
+                txtOwnerId: {{ $.Values.mox.cluster.type }}
+                {{- else if has $.Values.mox.cluster.type (list "integrations") }}
+                txtOwnerId: dev-{{ $.Values.mox.cluster.type }}-public
+                {{- end }}
+
+                {{- if and (has $.Values.mox.cluster.env (list "ptdev" "dev" "stg" "prod")) (has $.Values.mox.cluster.type (list "frontend")) }}
+                policy: sync
+                {{- else }}
+                policy: upsert-only
+                {{- end }}
+
+                {{- if has $.Values.mox.cluster.type (list "frontend" "integrations") }}
+                domainFilters:
+                  {{- range $.Values.mox.cluster.dnsZones }}
+                  {{ if contains $.Values.mox.cluster.region . }}
+                  - '{{ . }}'
+                  {{- end }}
+                  {{- end }}
+                {{- else }}
+                domainFilters: {{ $.Values.mox.cluster.dnsZones | toJson }}
+                {{- end }}
+
+                provider: aws
+                extraArgs:
+                  - --aws-batch-change-size=1000
+                  {{- if and (has $.Values.mox.cluster.type (list "frontend")) }}
+                  {{- else if has $.Values.mox.cluster.type (list "integrations") }}
+                  - --aws-zone-type=public
+                  {{- else }}
+                  - --aws-zone-type=private
+                  {{- end }}
+                  - --exclude-record-types=AAAA
+
+    # Source 2: The Verifier Sidecar
+    - repoURL: https://github.com/ProjectDrgn/argocd-apps
+      path: apps/af-toolkit/verification/external-dns
+      targetRevision: {{ $.Values.mox.argocd.branch }}
+      plugin:
+        name: mox
+        env:
+          - name: helm
+            value: |
+              hostedZoneId: "test"
+              testDomainName: "test"
+              targetNamespace: "verification-external-dns"
+{{- end }}
