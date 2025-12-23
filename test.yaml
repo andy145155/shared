@@ -1,31 +1,7 @@
-{{- $app := index (include "apps" $ | fromYaml) "external-dns" }}
-{{- $values := $app.source.helm.values }}
-
-{{- if $app.enabled }}
----
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: {{ $.Values.mox.cluster.name }}-{{ $app.name }}
-  labels:
-    cluster: {{ $.Values.mox.cluster.name }}
-    env: {{ $.Values.mox.cluster.env }}
-    type: {{ $.Values.mox.cluster.type }}
-    app: {{ $app.name }}
-    instance: {{ $app.name }}
-    part-of: baseline
-    subset: app
-spec:
-  project: {{ $.Values.mox.cluster.name }}-{{ $app.name }}
-  destination:
-    name: {{ $.Values.mox.cluster.name }}
-    namespace: {{ $app.namespace.name }}
-  
-  # --- CHANGED: Using Multiple Sources ---
-  sources:
-    # Source 1: The Official Upstream Chart
-    - repoURL: https://kubernetes-sigs.github.io/{{ $app.name }}
-      chart: {{ $app.name }}
+sources:
+    # --- SOURCE 1: Official Chart (Same as before) ---
+    - repoURL: https://kubernetes-sigs.github.io/external-dns
+      chart: external-dns
       targetRevision: {{ $values.chartVersion }}
       plugin:
         name: mox
@@ -34,84 +10,43 @@ spec:
             value: |
               releaseName: {{ $app.name }}
               values:
+                # ... (Keep your existing External DNS values here) ...
                 image:
-                  repository: 030558737998.dkr.ecr.ap-east-1.amazonaws.com/{{ $app.name }}
-                  tag: v{{ $values.imageVersion }}{{ $values.imageTagSuffix }}
-
-                serviceAccount:
-                  create: false
-                  {{- if has $.Values.mox.cluster.type (list "integrations") }}
-                  name: external-dns-public
-                  {{- else }}
-                  name: external-dns
-                  {{- end }}
-
-                resources:
-                  requests:
-                    memory: 100Mi
-                    cpu: 10m
-                  limits:
-                    cpu: 50m
-                    memory: 150Mi
-                
-                logLevel: error
-                interval: 60s
-                
-                sources:
-                  {{- if has $.Values.mox.cluster.type (list "aiden" "apps" "forgerock" "keycloak" "iaspec" "tm-vault" "vault") }}
-                  - istio-gateway
-                  {{- else if has $.Values.mox.cluster.type (list "crossenv" "cybsecops" "frontend") }}
-                  - service
-                  - ingress
-                  {{- else }}
-                  - service
-                  {{- end }}
-
-                # TODO: proper owner id
-                {{- if (has $.Values.mox.cluster.type (list "frontend")) }}
-                txtOwnerId: {{ $.Values.mox.cluster.type }}
-                {{- else if has $.Values.mox.cluster.type (list "integrations") }}
-                txtOwnerId: dev-{{ $.Values.mox.cluster.type }}-public
-                {{- end }}
-
-                {{- if and (has $.Values.mox.cluster.env (list "ptdev" "dev" "stg" "prod")) (has $.Values.mox.cluster.type (list "frontend")) }}
-                policy: sync
-                {{- else }}
-                policy: upsert-only
-                {{- end }}
-
-                {{- if has $.Values.mox.cluster.type (list "frontend" "integrations") }}
-                domainFilters:
-                  {{- range $.Values.mox.cluster.dnsZones }}
-                  {{ if contains $.Values.mox.cluster.region . }}
-                  - '{{ . }}'
-                  {{- end }}
-                  {{- end }}
-                {{- else }}
-                domainFilters: {{ $.Values.mox.cluster.dnsZones | toJson }}
-                {{- end }}
-
+                  repository: ...
                 provider: aws
-                extraArgs:
-                  - --aws-batch-change-size=1000
-                  {{- if and (has $.Values.mox.cluster.type (list "frontend")) }}
-                  {{- else if has $.Values.mox.cluster.type (list "integrations") }}
-                  - --aws-zone-type=public
-                  {{- else }}
-                  - --aws-zone-type=private
-                  {{- end }}
-                  - --exclude-record-types=AAAA
+                # ...
 
-    # Source 2: The Verifier Sidecar
+    # --- SOURCE 2: The Verifier Job (The "Spark Way") ---
+    # Spark uses the 'raw' plugin for sidecars. We will do the same.
     - repoURL: https://github.com/ProjectDrgn/argocd-apps
-      path: apps/af-toolkit/verification/external-dns
-      targetRevision: {{ $.Values.mox.argocd.branch }}
+      path: apps/af-toolkit # We just need a valid path, it doesn't matter much for 'raw'
+      targetRevision: HEAD
       plugin:
-        name: mox
+        name: raw-yaml  # Or 'raw' - check your apps.yaml line 106 to confirm the name
         env:
-          - name: helm
+          - name: yaml
             value: |
-              hostedZoneId: "test"
-              testDomainName: "test"
-              targetNamespace: "verification-external-dns"
-{{- end }}
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: external-dns-verifier
+                namespace: af-toolkit
+                annotations:
+                  argocd.argoproj.io/hook: PostSync
+                  argocd.argoproj.io/hook-delete-policy: HookSucceeded
+              spec:
+                template:
+                  spec:
+                    serviceAccountName: external-dns-verifier-sa
+                    restartPolicy: Never
+                    containers:
+                    - name: verifier
+                      image: platform-docker-images/external-dns-verifier:v1.0.0
+                      env:
+                      # We can inject values here because this block is templated!
+                      - name: HOSTED_ZONE_ID
+                        value: {{ $.Values.mox.cluster.dnsZones.base | quote }}
+                      - name: TEST_DOMAIN_NAME
+                        value: "ver-test.{{ $.Values.mox.cluster.domain.base }}"
+                      - name: TARGET_NAMESPACE
+                        value: "verification-external-dns"
