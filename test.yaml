@@ -1,15 +1,12 @@
+{{/* JSON Output to bypass mox indentation bugs */}}
 {{- define "baseline.verificationJob" -}}
-{{- /* Construct the full Job object as a dictionary first */ -}}
 {{- $job := dict 
     "apiVersion" "batch/v1" 
     "kind" "Job" 
     "metadata" (dict 
         "name" (printf "verification-%s" .appName) 
         "namespace" "af-toolkit"
-        "annotations" (dict 
-            "argocd.argoproj.io/hook" "PostSync" 
-            "argocd.argoproj.io/hook-delete-policy" "BeforeHookCreation"
-        )
+        "annotations" (dict "argocd.argoproj.io/hook" "PostSync" "argocd.argoproj.io/hook-delete-policy" "BeforeHookCreation")
     )
     "spec" (dict 
         "template" (dict 
@@ -21,24 +18,19 @@
                     "image" .image
                     "command" (list "/bin/sh" "-c")
                     "args" (list .command)
-                    "env" (list (dict 
-                        "name" "TARGET_NAMESPACE" 
-                        "value" (printf "verification-%s" .appName)
-                    ))
+                    "env" (list (dict "name" "TARGET_NAMESPACE" "value" (printf "verification-%s" .appName)))
                 ))
             )
         )
     )
 -}}
-{{- /* Output as a single line of JSON */ -}}
 {{- $job | toJson -}}
 {{- end -}}
 
-
 - name: raw
-      # No pipe (|), just the direct function call
-      value: {{ include "baseline.verificationJob" (dict 
-          "appName" "external-dns" 
-          "image" "platform-docker-images/external-dns-verifier:v1.0.0" 
-          "command" "python main.py"
-      ) }}
+      value: |
+        {{- include "baseline.verificationJob" (dict 
+            "appName" "external-dns" 
+            "image" "platform-docker-images/external-dns-verifier:v1.0.0" 
+            "command" "python main.py"
+        ) -}}
