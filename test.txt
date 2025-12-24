@@ -1,46 +1,115 @@
-Here is the updated Jira ticket. I have updated the **Tasks** and **Technical Approach** sections to reflect your strategy of using specific Docker images for each step rather than building a complex CLI tool structure.
+Here is the expanded, concrete example for **Option 1** that you can copy directly into your Slack message.
 
-***
-
-**Title:** Refactor Istio Verification Pipeline: Modularize into "Fail-Fast" ArgoCD Hooks
-
-**Description**
-
-**User Story**
-As a Platform Engineer, I want to split the current monolithic Istio verification job into separate Dockerized jobs triggered by ArgoCD hooks. This allows us to "fail fast" during upgrades and prevents broken sidecars from reaching production.
-
-**The Problem: "Verify at the End"**
-Currently, verification runs only *after* the entire upgrade (Control Plane sync + Workload restart) is complete.
-* **Risk:** If `istiod` is unhealthy, we don't catch it until thousands of pods have already restarted, causing potential downtime.
-* **Toil:** Requires manual triggering of the monolithic script.
-
-**The Solution: "Fail-Fast" Pipeline**
-We will implement a staged verification pipeline using ArgoCD Hooks and specific Docker images for each check.
-
-1.  **Stage 1: Pre-Flight (Safety)**
-    * **Hook:** `PreSync` on `istiod` App.
-    * **Image:** `istio/istioctl` (Official Image)
-    * **Task:** Run `istioctl x precheck`. Aborts if incompatible.
-2.  **Stage 2: Control Plane (Gatekeeper)**
-    * **Hook:** `PostSync` on `istiod` App.
-    * **Image:** `af-toolkit-controlplane` (or specific tag)
-    * **Task:** Verifies deployment status and proxy health. If this fails, **workloads are NOT restarted.**
-3.  **Stage 3: Data Plane (Final Check)**
-    * **Hook:** `PostSync` on `sequential-restart` App.
-    * **Image:** `af-toolkit-dataplane` (or specific tag)
-    * **Task:** Verifies mTLS and header logic *after* the restart completes.
+I have formatted it to clearly show the **File Structure** and the **Code** so your team sees exactly how clean this approach is compared to the current string injection.
 
 ---
 
-**Acceptance Criteria**
+### **Option 1: Helm Wrapper Chart (My Recommendation)**
 
-1.  **Pre-Check Gating:** If `istioctl x precheck` fails, the sync must **abort immediately**.
-2.  **Control Plane Gating:** If the Control Plane image/job fails, the pipeline stops. The downstream restart job must **not** run.
-3.  **Data Plane Verification:** mTLS and header checks run automatically only **after** the application restart job completes.
-4.  **Containerization:** Verification logic is separated into distinct Docker images/tags referenced by the ArgoCD Job manifests.
+We create a local "wrapper" chart nested within our baseline app folder. This wrapper declares the upstream chart (e.g., `kubernetes-sigs/external-dns`) as a dependency and includes our verification Job as a standard local template.
 
-**Tasks**
-* [ ] Create/Build Docker image for Control Plane verification (logic from `verify_controlplane.py`).
-* [ ] Create/Build Docker image for Data Plane verification (logic from `check_mtls.py`, `check_retry_after.py`).
-* [ ] Create `PreSync` job manifest using the official `istioctl` image.
-* [ ] Update ArgoCD Application manifests to reference these new images in Hook Jobs.
+* **Pros:** Uses standard Helm behavior; clean separation of upstream logic and our custom hooks; easiest to debug.
+* **Cons:** Requires maintaining a small local chart directory for each app.
+
+**1. File Structure**
+We simply add a `charts` folder inside our existing baseline app directory:
+
+```text
+apps/baseline/
+├── templates/external-dns.yaml      <-- App points to the local path below
+└── charts/external-dns-wrapper/     <-- New Wrapper Chart
+    ├── Chart.yaml                   <-- Declares dependency on upstream chart
+    ├── values.yaml                  <-- Our custom values
+    └── templates/
+        └── verification-job.yaml    <-- Our PostSync Job (Standard YAML file)
+
+```
+
+**2. Chart.yaml (The dependency link)**
+
+```yaml
+apiVersion: v2
+name: external-dns-wrapper
+version: 1.0.0
+dependencies:
+  - name: external-dns
+    version: 1.19.0
+    repository: https://kubernetes-sigs.github.io/external-dns
+
+```
+
+**3. Application Definition (No more 'raw' string)**
+
+```yaml
+# apps/baseline/templates/external-dns.yaml
+spec:
+  source:
+    repoURL: https://github.com/ProjectDrgn/argocd-apps.git
+    path: apps/baseline/charts/external-dns-wrapper # Points to our local wrapper
+    targetRevision: HEAD
+    helm:
+      values: |
+        # We configure both the upstream app AND our job here using standard values
+        external-dns:
+          provider: aws
+        verification:
+          image: platform-docker-images/external-dns-verifier:v1.0.0
+
+```
+
+
+Great. Since that structure works for you, here is the final, polished Slack message.
+
+I have updated the **Option 1** example to explicitly use the `apps/baseline/charts/...` path. This shows your team that you have already thought about where the files will live to keep the repository organized.
+
+---
+
+**Subject:** Proposal: Implementation patterns for ArgoCD PostSync Verification
+
+Hi team,
+
+I'm finalizing the automated verification setup for our baseline apps (starting with `external-dns`). The goal is to run a `PostSync` job in the `af-toolkit` namespace to verify deployments automatically.
+
+I’ve prototyped the implementation and would like to propose three architectural patterns for the long term.
+
+**Option 1: Helm Wrapper Chart (My Recommendation)**
+We create a local "wrapper" chart nested within our baseline app folder. This wrapper declares the upstream chart (e.g., `kubernetes-sigs/external-dns`) as a dependency and includes our verification Job as a standard local template.
+
+* **Pros:** Clean separation; allows us to add custom resources (like our Verification Job) to public charts without relying on `mox` plugin string injection; keeps logic self-contained in the `baseline` folder.
+* **Cons:** Requires creating a small local folder for each app.
+
+*Example Structure:*
+
+```yaml
+# apps/baseline/charts/external-dns-wrapper/Chart.yaml
+dependencies:
+  - name: external-dns
+    version: 1.19.0
+    repository: https://kubernetes-sigs.github.io/external-dns
+
+# apps/baseline/charts/external-dns-wrapper/templates/verification-job.yaml
+# (Our standard Job file lives here normally - no "raw" text injection needed)
+
+```
+
+**Option 2: Separate Verification Application**
+We decouple testing from deployment by creating a separate ArgoCD Application (e.g., `verification-external-dns`) that manages only the test jobs.
+
+* **Pros:** Complete isolation; verification failures don't affect the main app's health status.
+* **Cons:** Increases the number of Apps in ArgoCD; slightly more complex orchestration to ensure they sync in order.
+
+**Option 3: Mox Plugin `raw` Injection**
+We utilize the existing feature of our `mox` plugin to inject the verification Job manifest via the `raw` environment variable directly in the Application definition.
+
+* **Pros:** Zero changes to repo structure; keeps everything contained within the single Application file.
+* **Cons:** The manifest is embedded as a string variable, which can make debugging indentation or syntax errors difficult.
+
+I am leaning towards **Option 1** for its stability and ease of debugging. Thoughts?
+
+CC: @[Team Lead Name]
+
+---
+
+### Next Step
+
+Once you send this and get approval (or if you want to start building it now), I can provide the exact file contents for `Chart.yaml`, `values.yaml`, and `verification-job.yaml` so you can copy-paste them directly into your new folder. Just let me know!
