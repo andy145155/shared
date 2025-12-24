@@ -1,32 +1,22 @@
-# 1. Create a dummy app directory
-mkdir -p /tmp/debug-test
-cd /tmp/debug-test
-
-# 2. Simulate the 'raw' variable (Paste your YAML content here)
-# We are manually simulating what ArgoCD passes to the plugin
-export ARGOCD_ENV_raw='
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: debug-manual-job
-  namespace: af-toolkit
-spec:
-  template:
-    spec:
-      containers:
-      - name: test
-        image: alpine
-      restartPolicy: Never
-'
-
-# 3. Simulate the 'helm' variable (Empty placeholder to satisfy checks)
-export ARGOCD_ENV_helm='values: {}'
-
-# 4. Run the critical line from mox-cmp.sh MANUALLY
-# This will show us if the indentation is getting stripped!
-cat <<< $ARGOCD_ENV_raw > raw.yaml
-
-# 5. Inspect the result
-echo "--- CONTENT OF raw.yaml ---"
-cat raw.yaml
-echo "---------------------------"
+# Add this hyphen at the start!
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: verification-external-dns
+    namespace: af-toolkit
+    annotations:
+      argocd.argoproj.io/hook: PostSync
+      argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+  spec:
+    template:
+      spec:
+        serviceAccountName: verification-external-dns
+        restartPolicy: Never
+        containers:
+        - name: verifier
+          image: platform-docker-images/external-dns-verifier:v1.0.0
+          command: ["/bin/sh", "-c"]
+          args: ["python main.py"]
+          env:
+          - name: TARGET_NAMESPACE
+            value: verification-external-dns
