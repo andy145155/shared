@@ -1,7 +1,32 @@
-- name: raw
-      value: |
-        {{- /* We use .Files.Get to read the clean YAML file, 
-           and nindent to safely inject it into this block.
-           This mimics the safety of the apps.yaml 'toYaml | nindent' pattern.
-        */ -}}
-        {{- .Files.Get "files/verification-external-dns.yaml" | nindent 10 }}
+# 1. Create a dummy app directory
+mkdir -p /tmp/debug-test
+cd /tmp/debug-test
+
+# 2. Simulate the 'raw' variable (Paste your YAML content here)
+# We are manually simulating what ArgoCD passes to the plugin
+export ARGOCD_ENV_raw='
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: debug-manual-job
+  namespace: af-toolkit
+spec:
+  template:
+    spec:
+      containers:
+      - name: test
+        image: alpine
+      restartPolicy: Never
+'
+
+# 3. Simulate the 'helm' variable (Empty placeholder to satisfy checks)
+export ARGOCD_ENV_helm='values: {}'
+
+# 4. Run the critical line from mox-cmp.sh MANUALLY
+# This will show us if the indentation is getting stripped!
+cat <<< $ARGOCD_ENV_raw > raw.yaml
+
+# 5. Inspect the result
+echo "--- CONTENT OF raw.yaml ---"
+cat raw.yaml
+echo "---------------------------"
