@@ -1,10 +1,98 @@
+# 1. The Job (Actual Test)
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: verification-external-dns
+    namespace: af-toolkit
+    annotations:
+      argocd.argoproj.io/hook: PostSync
+      argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+  spec:
+    template:
+      spec:
+        # UPDATED: Matches the ServiceAccount below
+        serviceAccountName: external-dns-verifier-sa
+        restartPolicy: Never
+        containers:
+        - name: verifier
+          image: platform-docker-images/external-dns-verifier:v1.0.0
+          command: ["/bin/sh", "-c"]
+          args: ["python main.py"]
+          env:
+          - name: TARGET_NAMESPACE
+            value: verification-external-dns
+
+# 2. ServiceAccount
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: external-dns-verifier-sa
+    namespace: af-toolkit
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_IRSA_ROLE_NAME"
+
+# 3. Role
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: external-dns-verifier-role
+    namespace: verification-external-dns
+  rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "delete", "list", "patch"]
+
+# 4. RoleBinding
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: external-dns-verifier-binding
+    namespace: verification-external-dns
+  subjects:
+  - kind: ServiceAccount
+    name: external-dns-verifier-sa
+    namespace: af-toolkit
+  roleRef:
+    kind: Role
+    name: external-dns-verifier-role
+    apiGroup: rbac.authorization.k8s.io
+
+# 5. ClusterRole
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRole
+  metadata:
+    name: external-dns-verifier-viewer
+  rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+# 6. ClusterRoleBinding
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRoleBinding
+  metadata:
+    name: external-dns-verifier-viewer-binding
+  subjects:
+  - kind: ServiceAccount
+    name: external-dns-verifier-sa
+    namespace: af-toolkit
+  roleRef:
+    kind: ClusterRole
+    name: external-dns-verifier-viewer
+    apiGroup: rbac.authorization.k8s.io
+
+
 - name: raw
       value: |
-        {{- /* Load the file as a LIST */ -}}
-        {{- $jobList := .Files.Get "files/verification-external-dns.yaml" | fromYaml -}}
+        {{- /* 1. Load the LIST of resources from the file */ -}}
+        {{- $resourceList := .Files.Get "files/verification-external-dns.yaml" | fromYaml -}}
+
+        {{- /* 2. Loop through each item in the list */ -}}
+        {{- range $resourceList }}
         
-        {{- /* COPY OF APPS.YAML LOGIC: Loop through the list */ -}}
-        {{- range $jobList }}
-        {{- "---" | nindent 10 }}       {{- /* Safely adds the separator */ -}}
-        {{- . | toYaml | nindent 10 }}  {{- /* Formats the job */ -}}
+        {{- /* 3. Add the Separator (Critical for the plugin) */ -}}
+        ---
+        {{- /* 4. Output as JSON (Bypasses ALL indentation bugs) */ -}}
+        {{ . | toJson }}
+        
         {{- end }}
