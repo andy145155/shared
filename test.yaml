@@ -1,8 +1,10 @@
 - name: raw
       value: |
-        {{- /* 1. Load the file and parse it into an Object (Data) */ -}}
-        {{- $jobData := .Files.Get "files/verification-external-dns.yaml" | fromYaml -}}
+        {{- /* Load the file as a LIST */ -}}
+        {{- $jobList := .Files.Get "files/verification-external-dns.yaml" | fromYaml -}}
         
-        {{- /* 2. Mimic the 'Factory Pattern' from apps.yaml: Add Separator + Safe Indentation */ -}}
-        ---
-        {{- $jobData | toYaml | nindent 10 }}
+        {{- /* COPY OF APPS.YAML LOGIC: Loop through the list */ -}}
+        {{- range $jobList }}
+        {{- "---" | nindent 10 }}       {{- /* Safely adds the separator */ -}}
+        {{- . | toYaml | nindent 10 }}  {{- /* Formats the job */ -}}
+        {{- end }}
