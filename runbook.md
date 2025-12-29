@@ -1,14 +1,14 @@
-Here is a comprehensive Markdown section you can add to your `README.md`.
+Here is the updated **README.md** section.
 
-It covers the entire workflow: setting up the workspace locally, handling the corporate proxy/SSL issues you just encountered, adding dependencies to specific sub-projects, and deploying via Docker and GitHub Actions.
+I have rewritten it to reflect your **Decoupled** structure (where each folder is an independent project) and added the details about the new Governance checks.
 
 ---
 
 ### 📦 Dependency Management (uv)
 
-We use **[uv](https://github.com/astral-sh/uv)** to manage Python dependencies, virtual environments, and package resolution. It replaces `pip`, `virtualenv`, and `requirements.txt`.
+We have migrated from `requirements.txt` to **[uv](https://github.com/astral-sh/uv)** for faster, deterministic, and secure dependency management.
 
-This repository is set up as a **uv Workspace**, meaning we have one lockfile (`uv.lock`) in the root that manages versions for all sub-projects (`verification-external-dns`, `verification-istio`, etc.) simultaneously.
+Each tool in this repository (`verification-external-dns`, `ecr-cleanup`, etc.) is an **independent project** with its own `pyproject.toml` and `uv.lock`.
 
 #### 1. Installation
 
@@ -28,130 +28,98 @@ brew install uv
 
 #### 2. Local Development
 
-##### Initial Setup
+Because projects are decoupled, you must manage dependencies inside each tool's folder.
 
-To set up the environment for **all** tools in the repo at once:
+**Initial Setup for a Tool:**
 
 ```bash
+cd verification-external-dns
 uv sync
 
 ```
 
-This creates a central virtual environment at `.venv` in the root directory.
+*This creates a `.venv` inside that specific folder.*
 
-##### Running Scripts
-
-You do not need to manually activate the virtual environment. Use `uv run` from anywhere in the repo:
+**Running Scripts:**
+You do not need to manually activate the virtual environment. Use `uv run` to execute commands using that folder's environment.
 
 ```bash
-# Run a script inside the 'verification-external-dns' folder
-uv run verification-external-dns/verification_external_dns.py
+# Run the script
+uv run verification_external_dns.py
 
-# Run a test using the shared environment
+# Run tests
 uv run pytest
 
 ```
 
-##### Adding Libraries
-
-Since this is a workspace, you must specify *which* tool needs the library.
-
-**Don't do this:** `uv add boto3` (this adds it to the root, which is usually wrong).
-**Do this:**
+**Adding New Libraries:**
 
 ```bash
-# Add 'boto3' specifically to the external-dns tool
-uv add boto3 --package verification-external-dns
+cd verification-external-dns
+uv add boto3
 
 ```
 
-#### ⚠️ Troubleshooting: SSL / Corporate Proxy Issues
+*This automatically updates `pyproject.toml` and regenerates `uv.lock`.*
 
-If you see `invalid peer certificate: UnknownIssuer` or connection errors when running `uv sync` or installing Python:
+#### 3. Docker Implementation
 
-**Option A: Use System Python (Recommended for Corporate Devices)**
-Install Python via Homebrew (which handles certificates better) and tell `uv` to use it instead of downloading its own.
+We use a standard multi-stage build pattern that respects the lockfile. Since projects are independent, the Dockerfile is self-contained.
+
+**Standard Pattern:**
+
+```dockerfile
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+WORKDIR /app
+
+# 1. Copy dependency definitions
+COPY pyproject.toml uv.lock ./
+
+# 2. Sync dependencies (frozen ensures lockfile match)
+RUN uv sync --frozen --no-dev --no-install-project
+
+# 3. Enable the environment
+ENV PATH="/app/.venv/bin:$PATH"
+
+# 4. Copy source code
+COPY scripts/ .
+
+CMD ["python", "main.py"]
+
+```
+
+#### 4. CI/CD Governance
+
+We enforce strict dependency policies in GitHub Actions. Your PR will fail if:
+
+1. **Forbidden Files:** You commit a `requirements.txt` file (delete it and use `uv add -r ...` to migrate).
+2. **Missing Lockfile:** You commit `pyproject.toml` but forget `uv.lock`.
+3. **Stale Lockfile:** Your `uv.lock` does not match `pyproject.toml`.
+* *Fix:* Run `uv lock` locally and push the changes.
+
+
+
+#### ⚠️ Troubleshooting: SSL / Corporate Proxy
+
+If you encounter `invalid peer certificate: UnknownIssuer` errors:
+
+**Option A: Use System Python (Recommended)**
+Install Python via Homebrew and tell `uv` to use it instead of downloading a managed version.
 
 ```bash
 brew install python@3.12
+cd ecr-cleanup
 uv venv --python 3.12
 uv sync
 
 ```
 
 **Option B: Trust Custom Certificates**
-Export your corporate certificate bundle before running commands:
+Export the corporate certificate bundle before running commands:
 
 ```bash
-export SSL_CERT_FILE=/path/to/corporate-cert.pem
+export SSL_CERT_FILE=/path/to/zscaler_cert.pem
 uv sync
-
-```
-
----
-
-#### 3. Docker Implementation
-
-In a workspace, Docker builds are slightly different because `uv.lock` is in the root. We use a multi-stage build to keep images small.
-
-**Example `Dockerfile` for a sub-project:**
-
-```dockerfile
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
-
-WORKDIR /app
-
-# 1. Copy the ROOT workspace files first
-COPY pyproject.toml uv.lock ./
-
-# 2. Copy the specific tool's configuration
-COPY verification-external-dns/pyproject.toml ./verification-external-dns/
-
-# 3. Install dependencies ONLY for this specific tool
-# --package selects just this workspace member
-RUN uv sync --frozen --no-install-project --package verification-external-dns
-
-# --- Final Stage ---
-FROM python:3.12-slim-bookworm
-
-WORKDIR /app
-
-# Copy the environment from builder
-COPY --from=builder /app/.venv /app/.venv
-ENV PATH="/app/.venv/bin:$PATH"
-
-COPY verification-external-dns/ .
-
-CMD ["python", "verification_external_dns.py"]
-
-```
-
-#### 4. GitHub Actions (CI/CD)
-
-We use the official `setup-uv` action which handles caching automatically (making builds extremely fast).
-
-```yaml
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version-file: "pyproject.toml"
-
-      - name: Install Dependencies
-        run: uv sync --all-extras --dev
-
-      - name: Run Tests
-        run: uv run pytest
 
 ```
