@@ -1,98 +1,41 @@
-# 1. The Job (Actual Test)
-- apiVersion: batch/v1
-  kind: Job
-  metadata:
-    name: verification-external-dns
-    namespace: af-toolkit
-    annotations:
-      argocd.argoproj.io/hook: PostSync
-      argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-  spec:
-    template:
-      spec:
-        # UPDATED: Matches the ServiceAccount below
-        serviceAccountName: external-dns-verifier-sa
-        restartPolicy: Never
-        containers:
-        - name: verifier
-          image: platform-docker-images/external-dns-verifier:v1.0.0
-          command: ["/bin/sh", "-c"]
-          args: ["python main.py"]
-          env:
-          - name: TARGET_NAMESPACE
-            value: verification-external-dns
+name: Enforce UV Usage
 
-# 2. ServiceAccount
-- apiVersion: v1
-  kind: ServiceAccount
-  metadata:
-    name: external-dns-verifier-sa
-    namespace: af-toolkit
-    annotations:
-      eks.amazonaws.com/role-arn: "arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_IRSA_ROLE_NAME"
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
 
-# 3. Role
-- apiVersion: rbac.authorization.k8s.io/v1
-  kind: Role
-  metadata:
-    name: external-dns-verifier-role
-    namespace: verification-external-dns
-  rules:
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["create", "get", "delete", "list", "patch"]
+jobs:
+  policy-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-# 4. RoleBinding
-- apiVersion: rbac.authorization.k8s.io/v1
-  kind: RoleBinding
-  metadata:
-    name: external-dns-verifier-binding
-    namespace: verification-external-dns
-  subjects:
-  - kind: ServiceAccount
-    name: external-dns-verifier-sa
-    namespace: af-toolkit
-  roleRef:
-    kind: Role
-    name: external-dns-verifier-role
-    apiGroup: rbac.authorization.k8s.io
+      - name: 🚫 Check for forbidden requirements.txt
+        run: |
+          # Find any file named 'requirements.txt' (case insensitive)
+          FORBIDDEN_FILES=$(find . -type f -iname "requirements.txt" -not -path "./.git/*")
+          
+          if [ -n "$FORBIDDEN_FILES" ]; then
+            echo "❌ Policy Violation: The following forbidden files were found:"
+            echo "$FORBIDDEN_FILES"
+            echo ""
+            echo "We have migrated to 'uv'. Please delete 'requirements.txt' and use 'pyproject.toml' + 'uv.lock' instead."
+            exit 1
+          else
+            echo "✅ No requirements.txt files found."
+          fi
 
-# 5. ClusterRole
-- apiVersion: rbac.authorization.k8s.io/v1
-  kind: ClusterRole
-  metadata:
-    name: external-dns-verifier-viewer
-  rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
-
-# 6. ClusterRoleBinding
-- apiVersion: rbac.authorization.k8s.io/v1
-  kind: ClusterRoleBinding
-  metadata:
-    name: external-dns-verifier-viewer-binding
-  subjects:
-  - kind: ServiceAccount
-    name: external-dns-verifier-sa
-    namespace: af-toolkit
-  roleRef:
-    kind: ClusterRole
-    name: external-dns-verifier-viewer
-    apiGroup: rbac.authorization.k8s.io
-
-
-- name: raw
-      value: |
-        {{- /* 1. Load the LIST of resources from the file */ -}}
-        {{- $resourceList := .Files.Get "files/verification-external-dns.yaml" | fromYaml -}}
-
-        {{- /* 2. Loop through each item in the list */ -}}
-        {{- range $resourceList }}
-        
-        {{- /* 3. Add the Separator (Critical for the plugin) */ -}}
-        ---
-        {{- /* 4. Output as JSON (Bypasses ALL indentation bugs) */ -}}
-        {{ . | toJson }}
-        
-        {{- end }}
+      - name: 🔍 Check for uv.lock existence
+        run: |
+          # Ensure at least one uv.lock exists in the repo
+          LOCK_FILES=$(find . -type f -name "uv.lock" -not -path "./.git/*")
+          
+          if [ -z "$LOCK_FILES" ]; then
+             echo "❌ Policy Violation: No 'uv.lock' file found."
+             echo "Please run 'uv lock' to generate the lockfile before pushing."
+             exit 1
+          else
+             echo "✅ uv.lock found."
+          fi
