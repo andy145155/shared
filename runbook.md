@@ -1,125 +1,63 @@
-Here is the updated **README.md** section.
-
-I have rewritten it to reflect your **Decoupled** structure (where each folder is an independent project) and added the details about the new Governance checks.
+Here is a comprehensive PR description ready to copy and paste.
 
 ---
 
-### 📦 Dependency Management (uv)
+**Title:** chore: migrate dependency management to uv & add governance checks
 
-We have migrated from `requirements.txt` to **[uv](https://github.com/astral-sh/uv)** for faster, deterministic, and secure dependency management.
+### 📝 Summary
 
-Each tool in this repository (`verification-external-dns`, `ecr-cleanup`, etc.) is an **independent project** with its own `pyproject.toml` and `uv.lock`.
+This PR modernizes our Python dependency management by migrating from `requirements.txt` to **[uv](https://github.com/astral-sh/uv)**.
 
-#### 1. Installation
+We are moving to a **decoupled project structure** where each tool (e.g., `ecr-cleanup`, `verification-external-dns`) maintains its own `pyproject.toml` and `uv.lock`. This ensures deterministic builds, faster CI times, and better isolation between tools.
 
-**macOS / Linux:**
+### 🛠️ Key Changes
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+**1. Dependency Migration**
 
-```
+* Removed `requirements.txt` from all tool subdirectories.
+* Initialized `pyproject.toml` for each tool and generated strict `uv.lock` files to pin dependencies.
+* *Tools affected:* `verification-external-dns`, `ecr-cleanup`, `verification-istio`, etc.
 
-*Or via Homebrew:*
+**2. Docker Optimization**
+
+* Updated Dockerfiles to use `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` as the base builder.
+* Replaced `pip install` with `uv sync --frozen` for faster, cached installation.
+* Ensured Zscaler certificate compatibility within the `uv` build process.
+
+**3. CI/CD Governance**
+
+* Added a new GitHub Action: `.github/workflows/enforce-uv.yaml`.
+* **Policy Enforced:**
+* Fails if any tracked `requirements.txt` file is found.
+* Fails if `uv.lock` is missing or out-of-sync with `pyproject.toml`.
+
+
+
+**4. Documentation**
+
+* Updated `README.md` with a new "Dependency Management" section explaining how to use `uv` for local development (sync, run, add) and Docker builds.
+
+### 🚀 Benefits
+
+* **Speed:** Dependency resolution and installation are significantly faster (orders of magnitude over pip).
+* **Determinism:** `uv.lock` guarantees that the exact same package versions are used in local dev, CI, and Production.
+* **Safety:** The new governance workflow prevents dependency drift and ensures no one accidentally reverts to using `requirements.txt`.
+
+### 🧪 Testing
+
+* [x] **Local:** Verified `uv sync` and `uv run` work inside `verification-external-dns` and `ecr-cleanup`.
+* [x] **Docker:** Built images successfully using the new multi-stage Dockerfiles (tested with Zscaler certs).
+* [x] **CI:** Verified that the governance action correctly flags missing lockfiles.
+
+### ℹ️ Reviewer Notes
+
+To test this branch locally, you will need to install `uv`:
 
 ```bash
 brew install uv
-
-```
-
-#### 2. Local Development
-
-Because projects are decoupled, you must manage dependencies inside each tool's folder.
-
-**Initial Setup for a Tool:**
-
-```bash
+# Test a project
 cd verification-external-dns
 uv sync
-
-```
-
-*This creates a `.venv` inside that specific folder.*
-
-**Running Scripts:**
-You do not need to manually activate the virtual environment. Use `uv run` to execute commands using that folder's environment.
-
-```bash
-# Run the script
 uv run verification_external_dns.py
-
-# Run tests
-uv run pytest
-
-```
-
-**Adding New Libraries:**
-
-```bash
-cd verification-external-dns
-uv add boto3
-
-```
-
-*This automatically updates `pyproject.toml` and regenerates `uv.lock`.*
-
-#### 3. Docker Implementation
-
-We use a standard multi-stage build pattern that respects the lockfile. Since projects are independent, the Dockerfile is self-contained.
-
-**Standard Pattern:**
-
-```dockerfile
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
-
-WORKDIR /app
-
-# 1. Copy dependency definitions
-COPY pyproject.toml uv.lock ./
-
-# 2. Sync dependencies (frozen ensures lockfile match)
-RUN uv sync --frozen --no-dev --no-install-project
-
-# 3. Enable the environment
-ENV PATH="/app/.venv/bin:$PATH"
-
-# 4. Copy source code
-COPY scripts/ .
-
-CMD ["python", "main.py"]
-
-```
-
-#### 4. CI/CD Governance
-
-We enforce strict dependency policies in GitHub Actions. Your PR will fail if:
-
-1. **Forbidden Files:** You commit a `requirements.txt` file (delete it and use `uv add -r ...` to migrate).
-2. **Missing Lockfile:** You commit `pyproject.toml` but forget `uv.lock`.
-3. **Stale Lockfile:** Your `uv.lock` does not match `pyproject.toml`.
-* *Fix:* Run `uv lock` locally and push the changes.
-
-
-
-#### ⚠️ Troubleshooting: SSL / Corporate Proxy
-
-If you encounter `invalid peer certificate: UnknownIssuer` errors:
-
-**Option A: Use System Python (Recommended)**
-Install Python via Homebrew and tell `uv` to use it instead of downloading a managed version.
-
-```bash
-brew install python@3.12
-cd ecr-cleanup
-uv venv --python 3.12
-uv sync
-
-```
-
-**Option B: Trust Custom Certificates**
-Export the corporate certificate bundle before running commands:
-
-```bash
-export SSL_CERT_FILE=/path/to/zscaler_cert.pem
-uv sync
 
 ```
