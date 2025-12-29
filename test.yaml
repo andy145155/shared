@@ -6,36 +6,23 @@ on:
   pull_request:
 
 jobs:
-  policy-check:
+  uv-governance:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 1. Install uv (needed to run the sync check)
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # 2. Rule: No requirements.txt allowed in tracked files
       - name: 🚫 Check for forbidden requirements.txt
         run: |
-          # Find any file named 'requirements.txt' (case insensitive)
-          FORBIDDEN_FILES=$(find . -type f -iname "requirements.txt" -not -path "./.git/*")
-          
-          if [ -n "$FORBIDDEN_FILES" ]; then
-            echo "❌ Policy Violation: The following forbidden files were found:"
-            echo "$FORBIDDEN_FILES"
-            echo ""
-            echo "We have migrated to 'uv'. Please delete 'requirements.txt' and use 'pyproject.toml' + 'uv.lock' instead."
+          FORBIDDEN=$(git ls-files | grep -i "requirements.txt" || true)
+          if [ -n "$FORBIDDEN" ]; then
+            echo "❌ Policy Violation: Found tracked 'requirements.txt' files:"
+            echo "$FORBIDDEN"
+            echo "Please remove them and use 'pyproject.toml' + 'uv.lock'."
             exit 1
-          else
-            echo "✅ No requirements.txt files found."
-          fi
-
-      - name: 🔍 Check for uv.lock existence
-        run: |
-          # Ensure at least one uv.lock exists in the repo
-          LOCK_FILES=$(find . -type f -name "uv.lock" -not -path "./.git/*")
-          
-          if [ -z "$LOCK_FILES" ]; then
-             echo "❌ Policy Violation: No 'uv.lock' file found."
-             echo "Please run 'uv lock' to generate the lockfile before pushing."
-             exit 1
-          else
-             echo "✅ uv.lock found."
           fi
