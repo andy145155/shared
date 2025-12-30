@@ -1,28 +1,22 @@
-name: Enforce UV Usage
+annotations:
+        # Use the value from values.yaml, or default to "PostSync" if missing
+        argocd.argoproj.io/hook: {{ $jobConfig.hook | default "PostSync" }}
+        # Use the value from values.yaml, or default to "BeforeHookCreation"
+        argocd.argoproj.io/hook-delete-policy: {{ $jobConfig.hookDeletePolicy | default "BeforeHookCreation" }}
 
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
+resources:
+          {{- toYaml ($jobConfig.resources | default dict) | nindent 10 }}
 
-jobs:
-  uv-governance:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # 1. Install uv (needed to run the sync check)
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      # 2. Rule: No requirements.txt allowed in tracked files
-      - name: 🚫 Check for forbidden requirements.txt
-        run: |
-          FORBIDDEN=$(git ls-files | grep -i "requirements.txt" || true)
-          if [ -n "$FORBIDDEN" ]; then
-            echo "❌ Policy Violation: Found tracked 'requirements.txt' files:"
-            echo "$FORBIDDEN"
-            echo "Please remove them and use 'pyproject.toml' + 'uv.lock'."
-            exit 1
-          fi
+image: {{ required "A repository is required" $jobConfig.image.repository }}:{{ required "A tag is required" $jobConfig.image.tag }}
+external-dns:
+  default:
+    verification:
+      enabled: true
+      jobs:
+        external-dns:
+          enabled: true
+          # ... existing image config ...
+          
+          # NEW: Pass hook configuration here
+          hook: PostSync
+          hookDeletePolicy: HookSucceeded,HookFailed
