@@ -1,22 +1,49 @@
-# Add this hyphen at the start!
-- apiVersion: batch/v1
-  kind: Job
-  metadata:
-    name: verification-external-dns
-    namespace: af-toolkit
-    annotations:
-      argocd.argoproj.io/hook: PostSync
-      argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-  spec:
-    template:
-      spec:
-        serviceAccountName: verification-external-dns
-        restartPolicy: Never
-        containers:
-        - name: verifier
-          image: platform-docker-images/external-dns-verifier:v1.0.0
-          command: ["/bin/sh", "-c"]
-          args: ["python main.py"]
-          env:
-          - name: TARGET_NAMESPACE
-            value: verification-external-dns
+Based on the code changes and the debugging process we went through, here is a comprehensive Pull Request (PR) title and description for you.
+
+### PR Title
+
+**feat(external-dns): add automated post-sync verification job via ArgoCD hooks**
+
+---
+
+### PR Description
+
+**Summary**
+This PR introduces an automated verification step for the `external-dns` application. It creates a Kubernetes Job that runs immediately after ArgoCD syncs the application (`PostSync`), ensuring the deployment is healthy before the sync is considered successful.
+
+**Key Changes**
+
+* **New Helper Template (`_helpers.tpl`):**
+* Created a reusable `verification.job` template.
+* Includes logic to conditionally render the job based on the environment (e.g., only run in `ptdev`, `dev`).
+* Supports configurable ArgoCD hooks (`PostSync`, `BeforeHookCreation`) via `values.yaml`.
+* Includes safety checks (`required`) for image repositories/tags and correct YAML formatting for `resources` and `env` vars.
+
+
+* **Configuration (`values.yaml`):**
+* Added a `verification` block to `external-dns`.
+* Configured the specific verification image, environment variables (`TEST_NAMESPACE`), and execution hooks.
+* Moved the verification config under `default` to ensure proper inheritance across environments.
+
+
+* **Manifest Generation (`external-dns.yaml`):**
+* Updated the `raw` plugin logic to dynamically generate the Verification Job manifest using the new template.
+* Fixed `nil pointer` issues by correctly merging job configurations and removing dangling variables in the template call.
+
+
+* **RBAC Setup (`verification-external-dns.yaml`):**
+* Added a ServiceAccount, ClusterRole, and ClusterRoleBinding to grant the verification job permissions to list Pods and Services in the namespace.
+
+
+
+**Technical Details**
+
+* **Hook Policy:** The job is configured to delete itself before a new hook creation (`BeforeHookCreation`) to prevent name collisions on subsequent syncs.
+* **Safety:** The job has `backoffLimit: 0` and `activeDeadlineSeconds: 300` to prevent it from hanging indefinitely if the verification script fails.
+* **Formatting:** Logic added to cleanly handle the `resources` block, ensuring no empty `{}` or indentation errors occur when resources are not defined.
+
+**Testing**
+
+* Verified that the `raw` manifest renders correctly without syntax errors.
+* Confirmed that the Job is only generated for environments listed in `enabledEnvs`.
+* Validated that the `PostSync` hook triggers correctly in the `ptdev` environment.
