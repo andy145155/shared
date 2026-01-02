@@ -1,49 +1,90 @@
-Based on the code changes and the debugging process we went through, here is a comprehensive Pull Request (PR) title and description for you.
+Based on your request to further split the work into three distinct phases, here is the breakdown for three separate Jira tickets.
 
-### PR Title
-
-**feat(external-dns): add automated post-sync verification job via ArgoCD hooks**
+This structure is highly effective for Agile workflows because it separates **Research (Spike)** from **Execution (Implementation)**, preventing "rabbit holes" where a ticket gets stuck in development because the solution wasn't fully defined yet.
 
 ---
 
-### PR Description
+### **Ticket 1: The Documentation Ticket (PLOPS-448)**
 
-**Summary**
-This PR introduces an automated verification step for the `external-dns` application. It creates a Kubernetes Job that runs immediately after ArgoCD syncs the application (`PostSync`), ensuring the deployment is healthy before the sync is considered successful.
+*Focus: Standardization and Compliance*
 
-**Key Changes**
+**Title:**
+`[EKS Runbook] Create Standardized Release Runbook for datadog-agent`
 
-* **New Helper Template (`_helpers.tpl`):**
-* Created a reusable `verification.job` template.
-* Includes logic to conditionally render the job based on the environment (e.g., only run in `ptdev`, `dev`).
-* Supports configurable ArgoCD hooks (`PostSync`, `BeforeHookCreation`) via `values.yaml`.
-* Includes safety checks (`required`) for image repositories/tags and correct YAML formatting for `resources` and `env` vars.
+**Description:**
+**Objective**
+Create a standardized runbook for upgrading the `datadog-agent` in EKS clusters. This document will serve as the Source of Truth for all future agent releases.
 
+**Requirements**
 
-* **Configuration (`values.yaml`):**
-* Added a `verification` block to `external-dns`.
-* Configured the specific verification image, environment variables (`TEST_NAMESPACE`), and execution hooks.
-* Moved the verification config under `default` to ensure proper inheritance across environments.
+1. **Template:** Must strictly follow `PLC-000: Change Runbook Template`.
+2. **Reference:** Use `PLC-002: External-dns Release Runbook` as the gold standard for formatting.
+3. **Reuse:** Leverage the `Kubernetes Baseline App Release Excerpt` for generic steps (e.g., ArgoCD syncs) to avoid duplication.
 
+**Acceptance Criteria**
 
-* **Manifest Generation (`external-dns.yaml`):**
-* Updated the `raw` plugin logic to dynamically generate the Verification Job manifest using the new template.
-* Fixed `nil pointer` issues by correctly merging job configurations and removing dangling variables in the template call.
+* [ ] **Confluence Page:** A new page exists for the Datadog Agent Release Runbook.
+* [ ] **Compliance:** The runbook follows the standard structure (Pre-checks, Execution, Rollback, Post-checks).
+* [ ] **Review:** The runbook has been reviewed and approved by Platform Engineers (AF/PLOPS).
 
+---
 
-* **RBAC Setup (`verification-external-dns.yaml`):**
-* Added a ServiceAccount, ClusterRole, and ClusterRoleBinding to grant the verification job permissions to list Pods and Services in the namespace.
+### **Ticket 2: The Investigation Ticket (New Ticket)**
 
+*Focus: Research & Discovery (Time-boxed Spike)*
 
+**Title:**
+`[Spike] Investigate Verification Steps for datadog-agent`
 
-**Technical Details**
+**Description:**
+**Context**
+Before automating the verification pipeline, we need to identify exactly *how* to verify that `datadog-agent` is healthy. Unlike standard deployments, the agent runs as a DaemonSet and has specific health metrics.
 
-* **Hook Policy:** The job is configured to delete itself before a new hook creation (`BeforeHookCreation`) to prevent name collisions on subsequent syncs.
-* **Safety:** The job has `backoffLimit: 0` and `activeDeadlineSeconds: 300` to prevent it from hanging indefinitely if the verification script fails.
-* **Formatting:** Logic added to cleanly handle the `resources` block, ensuring no empty `{}` or indentation errors occur when resources are not defined.
+**Goal**
+Identify the specific `kubectl` commands, API calls, or log patterns required to confirm the agent is fully functional.
 
-**Testing**
+**Output**
+A list of verified commands/logic documented in the Jira comments or a design doc, ready to be handed off for implementation.
 
-* Verified that the `raw` manifest renders correctly without syntax errors.
-* Confirmed that the Job is only generated for environments listed in `enabledEnvs`.
-* Validated that the `PostSync` hook triggers correctly in the `ptdev` environment.
+**Acceptance Criteria**
+
+* [ ] **Commands Identified:** Specific commands to check DaemonSet rollout status and Pod health are identified.
+* [ ] **Functional Check:** A method to verify the agent is actually sending metrics/logs (connectivity check) is identified.
+* [ ] **Manual Validation:** The identified steps have been manually tested against a live cluster to ensure accuracy.
+* [ ] **Edge Cases:** Potential failure scenarios (e.g., node not ready) are noted.
+
+---
+
+### **Ticket 3: The Implementation Ticket (PLOPS-554)**
+
+*Focus: Coding & Automation*
+*Blocker: This ticket cannot start until Ticket 2 is complete.*
+
+**Title:**
+`[Automation] Implement Verification Pipeline for datadog-agent`
+
+**Description:**
+**Objective**
+Develop an automated verification script in `ProjectDrgn/platform-automation` based on the findings from the investigation phase.
+
+**Scope**
+
+1. **Scripting:** Write a Python/Shell script that executes the logic defined in the Investigation ticket.
+2. **Integration:** Configure this script to run as an **ArgoCD Post-Sync Hook**.
+3. **Documentation:** Create a `README.md` explaining how the verification logic works.
+
+**Acceptance Criteria**
+
+* [ ] **Script Created:** A verification script exists in `ProjectDrgn/platform-automation`.
+* [ ] **ArgoCD Hook:** The script is successfully triggered by ArgoCD after a deployment.
+* [ ] **Pass/Fail Logic:** The script correctly fails the pipeline if the datadog-agent is unhealthy.
+* [ ] **Documentation:** `README.md` is updated with verification logic details.
+* [ ] **Peer Review:** Code passed PR review.
+
+---
+
+### **Suggested Workflow for You**
+
+1. **Keep PLOPS-448** as is (Runbook).
+2. **Create a NEW ticket** for "Investigation" and link it as "Blocks PLOPS-554".
+3. **Update PLOPS-554** to be purely "Implementation" (remove the "investigate" lines from its description).
