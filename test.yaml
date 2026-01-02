@@ -35,51 +35,51 @@ data:
         action.lua: |
           local os = require("os")
           
-          local job = {}
-          job.apiVersion = obj.apiVersion
-          job.kind = obj.kind
+          -- Deep copy function to properly copy nested tables
+          function deepCopy(original)
+            local copy
+            if type(original) == 'table' then
+              copy = {}
+              for orig_key, orig_value in next, original, nil do
+                copy[deepCopy(orig_key)] = deepCopy(orig_value)
+              end
+              setmetatable(copy, deepCopy(getmetatable(original)))
+            else
+              copy = original
+            end
+            return copy
+          end
           
-          job.metadata = {}
+          -- Create a deep copy of the entire object
+          local job = deepCopy(obj)
+          
+          -- Update the name with retry suffix
           job.metadata.name = obj.metadata.name .. "-retry-" .. tostring(os.time())
-          job.metadata.namespace = obj.metadata.namespace
           
-          if obj.metadata.labels ~= nil then
-            job.metadata.labels = {}
-            for k, v in pairs(obj.metadata.labels) do
-              job.metadata.labels[k] = v
+          -- Clear fields that should not be copied
+          job.metadata.uid = nil
+          job.metadata.resourceVersion = nil
+          job.metadata.creationTimestamp = nil
+          job.metadata.generation = nil
+          job.metadata.managedFields = nil
+          job.status = nil
+          
+          -- Clear selector to let k8s generate new one
+          job.spec.selector = nil
+          
+          -- Clear controller-uid from pod template
+          if job.spec.template.metadata ~= nil then
+            if job.spec.template.metadata.labels ~= nil then
+              job.spec.template.metadata.labels["controller-uid"] = nil
+              job.spec.template.metadata.labels["batch.kubernetes.io/controller-uid"] = nil
+              job.spec.template.metadata.labels["job-name"] = nil
+              job.spec.template.metadata.labels["batch.kubernetes.io/job-name"] = nil
             end
           end
           
-          if obj.metadata.annotations ~= nil then
-            job.metadata.annotations = {}
-            for k, v in pairs(obj.metadata.annotations) do
-              job.metadata.annotations[k] = v
-            end
-          end
-          
-          if obj.metadata.labels ~= nil and obj.metadata.labels["app.kubernetes.io/instance"] ~= nil then
-            job.metadata.labels["app.kubernetes.io/instance"] = obj.metadata.labels["app.kubernetes.io/instance"]
-          end
-          
+          -- Add annotation to prevent sync issues
           job.metadata.annotations = job.metadata.annotations or {}
           job.metadata.annotations["argocd.argoproj.io/compare-options"] = "IgnoreExtraneous"
-          
-          job.spec = {}
-          job.spec.template = obj.spec.template
-          if obj.spec.backoffLimit ~= nil then
-            job.spec.backoffLimit = obj.spec.backoffLimit
-          end
-          if obj.spec.activeDeadlineSeconds ~= nil then
-            job.spec.activeDeadlineSeconds = obj.spec.activeDeadlineSeconds
-          end
-          if obj.spec.ttlSecondsAfterFinished ~= nil then
-            job.spec.ttlSecondsAfterFinished = obj.spec.ttlSecondsAfterFinished
-          end
-          
-          if job.spec.template.metadata ~= nil and job.spec.template.metadata.labels ~= nil then
-            job.spec.template.metadata.labels["controller-uid"] = nil
-            job.spec.template.metadata.labels["job-name"] = nil
-          end
           
           return {
             {
