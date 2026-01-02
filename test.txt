@@ -1,185 +1,19 @@
-Based on your request to further split the work into three distinct phases, here is the breakdown for three separate Jira tickets.
-
-This structure is highly effective for Agile workflows because it separates **Research (Spike)** from **Execution (Implementation)**, preventing "rabbit holes" where a ticket gets stuck in development because the solution wasn't fully defined yet.
-
----
-
-### **Ticket 1: The Documentation Ticket (PLOPS-448)**
-
-*Focus: Standardization and Compliance*
-
-**Title:**
-`[EKS Runbook] Create Standardized Release Runbook for datadog-agent`
-
-**Description:**
-**Objective**
-Create a standardized runbook for upgrading the `datadog-agent` in EKS clusters. This document will serve as the Source of Truth for all future agent releases.
-
-**Requirements**
-
-1. **Template:** Must strictly follow `PLC-000: Change Runbook Template`.
-2. **Reference:** Use `PLC-002: External-dns Release Runbook` as the gold standard for formatting.
-3. **Reuse:** Leverage the `Kubernetes Baseline App Release Excerpt` for generic steps (e.g., ArgoCD syncs) to avoid duplication.
-
-**Acceptance Criteria**
-
-* [ ] **Confluence Page:** A new page exists for the Datadog Agent Release Runbook.
-* [ ] **Compliance:** The runbook follows the standard structure (Pre-checks, Execution, Rollback, Post-checks).
-* [ ] **Review:** The runbook has been reviewed and approved by Platform Engineers (AF/PLOPS).
-
----
-
-### **Ticket 2: The Investigation Ticket (New Ticket)**
-
-*Focus: Research & Discovery (Time-boxed Spike)*
-
-**Title:**
-`[Spike] Investigate Verification Steps for datadog-agent`
-
-**Description:**
-**Context**
-Before automating the verification pipeline, we need to identify exactly *how* to verify that `datadog-agent` is healthy. Unlike standard deployments, the agent runs as a DaemonSet and has specific health metrics.
-
-**Goal**
-Identify the specific `kubectl` commands, API calls, or log patterns required to confirm the agent is fully functional.
-
-**Output**
-A list of verified commands/logic documented in the Jira comments or a design doc, ready to be handed off for implementation.
-
-**Acceptance Criteria**
-
-* [ ] **Commands Identified:** Specific commands to check DaemonSet rollout status and Pod health are identified.
-* [ ] **Functional Check:** A method to verify the agent is actually sending metrics/logs (connectivity check) is identified.
-* [ ] **Manual Validation:** The identified steps have been manually tested against a live cluster to ensure accuracy.
-* [ ] **Edge Cases:** Potential failure scenarios (e.g., node not ready) are noted.
-
----
-
-### **Ticket 3: The Implementation Ticket (PLOPS-554)**
-
-*Focus: Coding & Automation*
-*Blocker: This ticket cannot start until Ticket 2 is complete.*
-
-**Title:**
-`[Automation] Implement Verification Pipeline for datadog-agent`
-
-**Description:**
-**Objective**
-Develop an automated verification script in `ProjectDrgn/platform-automation` based on the findings from the investigation phase.
-
-**Scope**
-
-1. **Scripting:** Write a Python/Shell script that executes the logic defined in the Investigation ticket.
-2. **Integration:** Configure this script to run as an **ArgoCD Post-Sync Hook**.
-3. **Documentation:** Create a `README.md` explaining how the verification logic works.
-
-**Acceptance Criteria**
-
-* [ ] **Script Created:** A verification script exists in `ProjectDrgn/platform-automation`.
-* [ ] **ArgoCD Hook:** The script is successfully triggered by ArgoCD after a deployment.
-* [ ] **Pass/Fail Logic:** The script correctly fails the pipeline if the datadog-agent is unhealthy.
-* [ ] **Documentation:** `README.md` is updated with verification logic details.
-* [ ] **Peer Review:** Code passed PR review.
-
----
-
-### **Suggested Workflow for You**
-
-1. **Keep PLOPS-448** as is (Runbook).
-2. **Create a NEW ticket** for "Investigation" and link it as "Blocks PLOPS-554".
-3. **Update PLOPS-554** to be purely "Implementation" (remove the "investigate" lines from its description).
-
-
-
-Based on the excellent example of the `external-dns` README you provided, I have created a **Functional Verification Design Template**.
-
-I have also updated the **Investigation Ticket** to explicitly ask for this README structure and to pivot the language from "Health Check" (is it running?) to "Functional Verification" (does it work?).
-
-### **1. Revised Investigation Ticket**
-
-*Copy this into Jira. It is now generic enough for Istio, CoreDNS, etc.*
-
-**Title:**
-`[Spike] Investigate & Design Functional Verification for <App Name>`
-
-**Description:**
-**Context**
-We are implementing automated release verification for `<App Name>`. Merely checking if the Pods are "Running" is insufficient; we must prove the application is **functionally correct** before marking a release as successful.
 
 **Objective**
-Determine the precise logic required to verify `<App Name>` functions correctly in a live environment (e.g., "Can it actually resolve DNS?", "Can it actually ingest metrics?") and document this in a Design README.
+Develop the automated verification logic for the baseline app based on the approved Design Doc. The goal is to move beyond replace the manual verification and implement a an automated test that runs after every deployment.
 
-**Deliverables**
+**Scope of Work**
 
-1. **Functional Scenarios:** Identify 1-2 critical user journeys that prove the app works (e.g., for `external-dns`, the journey is "Create Record -> Verify -> Delete").
-2. **Safety Mechanisms:** Determine how to clean up test data (self-cleaning) so the verification script doesn't leave "garbage" resources in the cluster.
-3. **Design README:** Create a PR in `platform-automation` adding a new folder/README that follows the **Functional Verification Template** (see below).
+1. **Script Implementation:** Write the verification code (Python/Bash/Go) that executes the "Test Scenario" defined in the Design Doc.
+2. **Safety & Cleanup:** Implement the "Pre-flight Cleanup" and "Graceful Shutdown" logic to ensure the script is self-cleaning and does not leave test data in the cluster.
+3. **Containerization:** Build and publish the docker image for the verification script.
+4. **Integration:** Configure the Kubernetes Job manifest to run as an **ArgoCD PostSync/PreSync Hook** if possible.
 
 **Acceptance Criteria**
 
-* [ ] **Functional Logic Defined:** The investigation identified *behavioral* checks, not just *status* checks.
-* [ ] **Cleanup Strategy:** A method to ensure test isolation and cleanup (e.g., unique namespaces, pre-flight deletion) is defined.
-* [ ] **Prerequisites Listed:** Required RBAC/IAM permissions for the verification tool are listed.
-* [ ] **Design README Created:** A README.md is drafted and ready for review.
-
----
-
-### **2. The README / Design Doc Template**
-
-*This is the template the assignee should fill out. It is modeled after your `external-dns` example but generalized.*
-
-```markdown
-# Verification Design: <App Name>
-
-## Overview
-This tool provides automated verification for `<App Name>` releases on EKS. It is designed to run as an **ArgoCD PostSync Job** to certify that a new version is fully functional before promotion.
-
-* **Runbook:** [Link to Release Runbook]
-* **Target Environment:** (e.g., Non-prod only, or Safe for Prod?)
-
-## Functional Verification Logic
-Unlike standard Kubernetes health probes (liveness/readiness), this automation tests the actual **functionality** of the application.
-
-### Test Scenario: <Name of Primary Function>
-* **Goal:** Verify that <App Name> can <do its main job>.
-* **Workflow:**
-  1. **Setup:** (e.g., Create a dummy Service/Pod/Record)
-  2. **Trigger:** (e.g., Wait for the agent to pick up the change)
-  3. **Assertion:** (e.g., Query the API/DNS to confirm the change happened)
-  4. **Teardown:** (e.g., Delete the dummy resource)
-
-*(Optional: Insert Mermaid flowchart here if logic is complex)*
-
-## Architecture & Design
-The verification process uses the following components to ensure isolation:
-
-* **Namespace:** `verification-<app-name>` (Ephemeral namespace created for testing?)
-* **Verifier Job:** A Kubernetes Job running the verification script (Python/Bash).
-* **Target Resource:** The actual `<App Name>` installation being tested.
-
-### Safety Mechanisms & Cleanup
-To prevent polluting the cluster with test data ("Zombie resources"):
-1. **Pre-Flight Cleanup:** The script checks for existing test artifacts from previous failed runs and removes them before starting.
-2. **Graceful Shutdown:** The script catches `SIGTERM` signals to attempt cleanup if the job is cancelled.
-3. **Timeouts:** Hard timeout set to X minutes to prevent indefinite hanging.
-
-## Prerequisites
-The verification job requires specific permissions to interact with the cluster and external APIs.
-
-### Kubernetes RBAC
-The Job uses a ServiceAccount with the following permissions:
-* `create, delete` on <Resource Type> (to create test fixtures)
-* `get, list` on <App Name> (to verify version/status)
-
-### AWS Permissions (IAM)
-*(If applicable)*
-The Pod requires an IAM Role with:
-* `<Permission Name>`: Required to verify <External Service> connectivity.
-
-```
-
-### **Why this template works for you:**
-
-1. **Functional Focus:** The "Test Scenario" section forces the engineer to think about *behavior* (Create -> Trigger -> Assert) rather than just `kubectl get pods`.
-2. **Safety First:** It includes the **Safety Mechanisms** section from your `external-dns` example. This is critical for automation—you don't want your verification script filling your production DNS with thousands of "test-record-123" entries if it crashes.
-3. **Diagram Ready:** It leaves a spot for a flowchart but doesn't require it, honoring your "nice to have" constraint.
+* [ ] **Logic Implemented:** The script successfully performs the *functional* create/trigger/assert workflow defined in the Design Doc.
+* [ ] **Safety Mechanisms:** The script handles failures gracefully and cleans up test resources (preventing "zombie" resources).
+* [ ] **ArgoCD Integration:** The Job triggers automatically after a Sync and accurately reports status back to ArgoCD (Green = Functionally Working, Red = Functional Failure).
+* [ ] **Timeout Handling:** The Job has a configured `activeDeadlineSeconds` to prevent hanging indefinitely.
+* [ ] **README Finalized:** The Design Doc (README.md) created in the spike is updated with final usage instructions and configuration details.
+* [ ] **Code Review:** Code passed PR review.
