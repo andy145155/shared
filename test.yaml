@@ -1,18 +1,8 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: argocd-cm
-  namespace: argocd
-data:
-  resource.customizations.ignoreDifferences.batch_Job: |
-    jsonPointers:
-    - /spec/template/metadata/labels/controller-uid
-  
-  # Define the custom action
+# The key MUST be exactly "resource.customizations.actions.batch_Job"
   resource.customizations.actions.batch_Job: |
     discovery.lua: |
       actions = {}
-      -- Only show the button if the user added the specific label
+      -- Ensure the label matches what is on your resource
       if obj.metadata.labels and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
         actions["retry"] = {
           name = "Retry Job",
@@ -22,29 +12,30 @@ data:
       end
       return actions
 
+    # IMPORTANT: This 'definitions' line must match the indentation of 'discovery.lua' above
     definitions:
     - name: retry
       action.lua: |
         local os = require("os")
-        
-        -- Create a copy of the existing object
         local newObj = {}
+        
+        -- Copy basic fields
         newObj.apiVersion = obj.apiVersion
         newObj.kind = obj.kind
-        newObj.metadata = {}
         newObj.spec = obj.spec
-
-        -- Clean up metadata to ensure it's treated as a new object
-        -- We append a timestamp to the name to avoid collision
+        
+        -- Create clean metadata
+        newObj.metadata = {}
         newObj.metadata.name = obj.metadata.name .. "-retry-" .. os.time()
         newObj.metadata.namespace = obj.metadata.namespace
+        
+        -- Copy labels but NOT annotations (to avoid copying the PostSync hook annotation)
         newObj.metadata.labels = obj.metadata.labels
         
-        -- IMPORTANT: Clean up selector and controller-uid so K8s generates new ones
+        -- Clean up selector/uid so K8s sees this as a fresh Job
         newObj.spec.selector = nil
         newObj.spec.template.metadata.labels["controller-uid"] = nil
         
-        -- Return the instruction to create this new resource
         return {
           k8s = {
             version = "batch/v1",
