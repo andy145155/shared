@@ -6,57 +6,33 @@ metadata:
 data:
   resource.customizations.actions.batch_Job: |
     discovery.lua: |
-      -- Discover available actions for Jobs
       actions = {}
       local status = obj.status or {}
-      -- Show "Retry" action if the job has failed or completed
       if status.failed ~= nil or status.succeeded ~= nil then
         table.insert(actions, {name = "retry", disabled = false})
       end
       return actions
     definitions:
-      - name: retry
-        action.lua: |
-          -- To retry a Job, we need to:
-          -- 1. Delete the old Job (by returning nil, ArgoCD will delete it)
-          -- 2. Create a new Job with the same spec
-          
-          -- Create a copy of the Job for the new attempt
-          local newJob = {}
-          newJob.apiVersion = obj.apiVersion
-          newJob.kind = obj.kind
-          newJob.metadata = {}
-          newJob.metadata.name = obj.metadata.name
-          newJob.metadata.namespace = obj.metadata.namespace
-          newJob.metadata.labels = obj.metadata.labels
-          newJob.metadata.annotations = obj.metadata.annotations
-          
-          -- Copy the spec
-          newJob.spec = obj.spec
-          
-          -- Clear status fields and pod selector (required for retry)
-          newJob.spec.selector = nil
-          if newJob.spec.template and newJob.spec.template.metadata then
-            newJob.spec.template.metadata.labels = {}
-            -- Preserve non-job-related labels
-            if obj.spec.template.metadata.labels then
-              for k, v in pairs(obj.spec.template.metadata.labels) do
-                if not string.find(k, "controller-uid") and not string.find(k, "job-name") then
-                  newJob.spec.template.metadata.labels[k] = v
-                end
+    - name: retry
+      action.lua: |
+        local newJob = {}
+        newJob.apiVersion = obj.apiVersion
+        newJob.kind = obj.kind
+        newJob.metadata = {}
+        newJob.metadata.name = obj.metadata.name
+        newJob.metadata.namespace = obj.metadata.namespace
+        newJob.metadata.labels = obj.metadata.labels
+        newJob.metadata.annotations = obj.metadata.annotations
+        newJob.spec = obj.spec
+        newJob.spec.selector = nil
+        if newJob.spec.template and newJob.spec.template.metadata then
+          newJob.spec.template.metadata.labels = {}
+          if obj.spec.template.metadata.labels then
+            for k, v in pairs(obj.spec.template.metadata.labels) do
+              if not string.find(k, "controller-uid") and not string.find(k, "job-name") then
+                newJob.spec.template.metadata.labels[k] = v
               end
             end
           end
-          
-          -- Return the result that creates a new Job
-          -- Setting impactedResource to delete the old one
-          return {
-            {
-              action = "delete",
-              resource = obj
-            },
-            {
-              action = "create",
-              resource = newJob
-            }
-          }
+        end
+        return {{action = "delete", resource = obj}, {action = "create", resource = newJob}}
