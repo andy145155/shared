@@ -91,66 +91,95 @@ Develop an automated verification script in `ProjectDrgn/platform-automation` ba
 
 
 
-Here is the revised **Generic Investigation Ticket**.
+Based on the excellent example of the `external-dns` README you provided, I have created a **Functional Verification Design Template**.
 
-I have generalized the language so you can clone this ticket for **Istio**, **CoreDNS**, **External-DNS**, etc., without rewriting it. I also added the "Design Doc" requirement as a primary deliverable.
+I have also updated the **Investigation Ticket** to explicitly ask for this README structure and to pivot the language from "Health Check" (is it running?) to "Functional Verification" (does it work?).
 
-### **Ticket: Generic Investigation & Design**
+### **1. Revised Investigation Ticket**
+
+*Copy this into Jira. It is now generic enough for Istio, CoreDNS, etc.*
 
 **Title:**
-`[Spike] Investigate & Design Verification Logic for <App Name>`
+`[Spike] Investigate & Design Functional Verification for <App Name>`
 
 **Description:**
-
 **Context**
-We are standardizing the release verification process for our platform add-ons. Standard Kubernetes "Running" status is often insufficient to guarantee that a complex application (like `<App Name>`) is actually serving traffic or functioning correctly.
+We are implementing automated release verification for `<App Name>`. Merely checking if the Pods are "Running" is insufficient; we must prove the application is **functionally correct** before marking a release as successful.
 
 **Objective**
-Determine the precise technical logic required to verify that `<App Name>` is healthy post-deployment and document this logic in a Design Doc.
+Determine the precise logic required to verify `<App Name>` functions correctly in a live environment (e.g., "Can it actually resolve DNS?", "Can it actually ingest metrics?") and document this in a Design README.
 
-**Scope of Investigation**
+**Deliverables**
 
-1. **Health Definition:** Determine what "Healthy" looks like for this specific app (e.g., specific log messages, endpoint availability, leader election status, DaemonSet rollout percent).
-2. **Command Identification:** Identify the specific CLI commands (kubectl, curl, etc.) or API calls required to validate the health criteria.
-3. **Documentation:** Create a **Design Doc** within the `platform-automation` repository (e.g., `docs/design/<app-name>-verification.md` or updated `README.md`) detailing the verification strategy.
+1. **Functional Scenarios:** Identify 1-2 critical user journeys that prove the app works (e.g., for `external-dns`, the journey is "Create Record -> Verify -> Delete").
+2. **Safety Mechanisms:** Determine how to clean up test data (self-cleaning) so the verification script doesn't leave "garbage" resources in the cluster.
+3. **Design README:** Create a PR in `platform-automation` adding a new folder/README that follows the **Functional Verification Template** (see below).
 
 **Acceptance Criteria**
 
-* [ ] **Logic Identified:** A set of commands/checks has been identified that covers:
-* Resource Health (Pods/Deployments/DaemonSets).
-* Functional Health (e.g., "Can it resolve a DNS record?", "Is the agent sending metrics?").
-
-
-* [ ] **Manual Validation:** The identified commands have been manually executed against a live cluster to verify accuracy.
-* [ ] **Design Doc Created:** A PR is raised/merged in `ProjectDrgn/platform-automation` containing the Design Document. This doc must explain *what* we are testing and *why*.
-* [ ] **Feasibility Check:** Confirmed that these checks can be automated via a script/ArgoCD hook.
+* [ ] **Functional Logic Defined:** The investigation identified *behavioral* checks, not just *status* checks.
+* [ ] **Cleanup Strategy:** A method to ensure test isolation and cleanup (e.g., unique namespaces, pre-flight deletion) is defined.
+* [ ] **Prerequisites Listed:** Required RBAC/IAM permissions for the verification tool are listed.
+* [ ] **Design README Created:** A README.md is drafted and ready for review.
 
 ---
 
-### **Bonus: The Design Doc Template**
+### **2. The README / Design Doc Template**
 
-Since you mentioned this requirement, here is a template you can put in the ticket description for the assignee to use. This ensures every app (Istio, Datadog, etc.) follows the same design structure.
-
-**[Template] Verification Design Doc**
+*This is the template the assignee should fill out. It is modeled after your `external-dns` example but generalized.*
 
 ```markdown
 # Verification Design: <App Name>
 
-## 1. Health Definition
-* **Workload Type:** (e.g., DaemonSet, Deployment, StateFulSet)
-* **Critical Dependencies:** (e.g., needs K8s API access, needs external network)
+## Overview
+This tool provides automated verification for `<App Name>` releases on EKS. It is designed to run as an **ArgoCD PostSync Job** to certify that a new version is fully functional before promotion.
 
-## 2. Automated Checks (The Logic)
-### Check 1: Resource Status
-* **Command:** `kubectl rollout status daemonset/<name> -n <namespace>`
-* **Success Criteria:** Exit code 0
+* **Runbook:** [Link to Release Runbook]
+* **Target Environment:** (e.g., Non-prod only, or Safe for Prod?)
 
-### Check 2: Functional Test
-* **Description:** (e.g., Verify agent is reporting to Datadog backend)
-* **Command:** `curl -f localhost:5000/status` inside the pod
-* **Success Criteria:** JSON response contains `"status": "up"`
+## Functional Verification Logic
+Unlike standard Kubernetes health probes (liveness/readiness), this automation tests the actual **functionality** of the application.
 
-## 3. Failure Scenarios
-* If Check 2 fails, it implies... (e.g., Invalid API Key)
+### Test Scenario: <Name of Primary Function>
+* **Goal:** Verify that <App Name> can <do its main job>.
+* **Workflow:**
+  1. **Setup:** (e.g., Create a dummy Service/Pod/Record)
+  2. **Trigger:** (e.g., Wait for the agent to pick up the change)
+  3. **Assertion:** (e.g., Query the API/DNS to confirm the change happened)
+  4. **Teardown:** (e.g., Delete the dummy resource)
+
+*(Optional: Insert Mermaid flowchart here if logic is complex)*
+
+## Architecture & Design
+The verification process uses the following components to ensure isolation:
+
+* **Namespace:** `verification-<app-name>` (Ephemeral namespace created for testing?)
+* **Verifier Job:** A Kubernetes Job running the verification script (Python/Bash).
+* **Target Resource:** The actual `<App Name>` installation being tested.
+
+### Safety Mechanisms & Cleanup
+To prevent polluting the cluster with test data ("Zombie resources"):
+1. **Pre-Flight Cleanup:** The script checks for existing test artifacts from previous failed runs and removes them before starting.
+2. **Graceful Shutdown:** The script catches `SIGTERM` signals to attempt cleanup if the job is cancelled.
+3. **Timeouts:** Hard timeout set to X minutes to prevent indefinite hanging.
+
+## Prerequisites
+The verification job requires specific permissions to interact with the cluster and external APIs.
+
+### Kubernetes RBAC
+The Job uses a ServiceAccount with the following permissions:
+* `create, delete` on <Resource Type> (to create test fixtures)
+* `get, list` on <App Name> (to verify version/status)
+
+### AWS Permissions (IAM)
+*(If applicable)*
+The Pod requires an IAM Role with:
+* `<Permission Name>`: Required to verify <External Service> connectivity.
 
 ```
+
+### **Why this template works for you:**
+
+1. **Functional Focus:** The "Test Scenario" section forces the engineer to think about *behavior* (Create -> Trigger -> Assert) rather than just `kubectl get pods`.
+2. **Safety First:** It includes the **Safety Mechanisms** section from your `external-dns` example. This is critical for automation—you don't want your verification script filling your production DNS with thousands of "test-record-123" entries if it crashes.
+3. **Diagram Ready:** It leaves a spot for a flowchart but doesn't require it, honoring your "nice to have" constraint.
