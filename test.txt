@@ -88,3 +88,69 @@ Develop an automated verification script in `ProjectDrgn/platform-automation` ba
 1. **Keep PLOPS-448** as is (Runbook).
 2. **Create a NEW ticket** for "Investigation" and link it as "Blocks PLOPS-554".
 3. **Update PLOPS-554** to be purely "Implementation" (remove the "investigate" lines from its description).
+
+
+
+Here is the revised **Generic Investigation Ticket**.
+
+I have generalized the language so you can clone this ticket for **Istio**, **CoreDNS**, **External-DNS**, etc., without rewriting it. I also added the "Design Doc" requirement as a primary deliverable.
+
+### **Ticket: Generic Investigation & Design**
+
+**Title:**
+`[Spike] Investigate & Design Verification Logic for <App Name>`
+
+**Description:**
+
+**Context**
+We are standardizing the release verification process for our platform add-ons. Standard Kubernetes "Running" status is often insufficient to guarantee that a complex application (like `<App Name>`) is actually serving traffic or functioning correctly.
+
+**Objective**
+Determine the precise technical logic required to verify that `<App Name>` is healthy post-deployment and document this logic in a Design Doc.
+
+**Scope of Investigation**
+
+1. **Health Definition:** Determine what "Healthy" looks like for this specific app (e.g., specific log messages, endpoint availability, leader election status, DaemonSet rollout percent).
+2. **Command Identification:** Identify the specific CLI commands (kubectl, curl, etc.) or API calls required to validate the health criteria.
+3. **Documentation:** Create a **Design Doc** within the `platform-automation` repository (e.g., `docs/design/<app-name>-verification.md` or updated `README.md`) detailing the verification strategy.
+
+**Acceptance Criteria**
+
+* [ ] **Logic Identified:** A set of commands/checks has been identified that covers:
+* Resource Health (Pods/Deployments/DaemonSets).
+* Functional Health (e.g., "Can it resolve a DNS record?", "Is the agent sending metrics?").
+
+
+* [ ] **Manual Validation:** The identified commands have been manually executed against a live cluster to verify accuracy.
+* [ ] **Design Doc Created:** A PR is raised/merged in `ProjectDrgn/platform-automation` containing the Design Document. This doc must explain *what* we are testing and *why*.
+* [ ] **Feasibility Check:** Confirmed that these checks can be automated via a script/ArgoCD hook.
+
+---
+
+### **Bonus: The Design Doc Template**
+
+Since you mentioned this requirement, here is a template you can put in the ticket description for the assignee to use. This ensures every app (Istio, Datadog, etc.) follows the same design structure.
+
+**[Template] Verification Design Doc**
+
+```markdown
+# Verification Design: <App Name>
+
+## 1. Health Definition
+* **Workload Type:** (e.g., DaemonSet, Deployment, StateFulSet)
+* **Critical Dependencies:** (e.g., needs K8s API access, needs external network)
+
+## 2. Automated Checks (The Logic)
+### Check 1: Resource Status
+* **Command:** `kubectl rollout status daemonset/<name> -n <namespace>`
+* **Success Criteria:** Exit code 0
+
+### Check 2: Functional Test
+* **Description:** (e.g., Verify agent is reporting to Datadog backend)
+* **Command:** `curl -f localhost:5000/status` inside the pod
+* **Success Criteria:** JSON response contains `"status": "up"`
+
+## 3. Failure Scenarios
+* If Check 2 fails, it implies... (e.g., Invalid API Key)
+
+```
