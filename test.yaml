@@ -4,16 +4,12 @@ metadata:
   name: argocd-cm
   namespace: argocd
 data:
-  resource.customizations.ignoreDifferences.batch_Job: |
-    jsonPointers:
-    - /spec/template/metadata/labels/controller-uid
-
   # Define the Custom Action for Batch/Job
   resource.customizations.actions.batch_Job: |
     discovery.lua: |
-      -- Only show this button if the job looks like a verification job
       actions = {}
-      if obj.metadata.name:match("^verification%-") then
+      -- Only show button if the specific label exists
+      if obj.metadata.labels and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
         actions["retry-verification"] = {
           ["title"] = "Retry Verification",
           ["icon"] = "fa-redo",
@@ -28,22 +24,22 @@ data:
           local os = require("os")
           local newJob = {}
           
-          -- Copy the base structure
+          -- Copy base structure
           newJob.apiVersion = obj.apiVersion
           newJob.kind = obj.kind
           newJob.metadata = {}
           
-          -- Generate a unique name for the retry
+          -- Create unique name: verification-app-retry-12345678
           newJob.metadata.name = obj.metadata.name .. "-retry-" .. os.time()
           newJob.metadata.namespace = obj.metadata.namespace
           newJob.metadata.labels = obj.metadata.labels
           newJob.metadata.annotations = obj.metadata.annotations
           
-          -- Copy the Spec
+          -- Copy spec
           newJob.spec = obj.spec
           
-          -- CRITICAL: Clean up fields that bind the job to the old instance
-          newJob.spec.selector = nil  -- Let K8s generate a new selector
+          -- Clean up immutable fields to allow re-submission
+          newJob.spec.selector = nil 
           if newJob.spec.template.metadata.labels then
             newJob.spec.template.metadata.labels["controller-uid"] = nil
           end
