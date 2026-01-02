@@ -1,43 +1,55 @@
-definitions:
-      - name: retry-verification
-        action.lua: |
-          local os = require("os")
-          local newJob = {}
-          
-          -- 1. Copy Basic Info
-          newJob.apiVersion = obj.apiVersion
-          newJob.kind = obj.kind
-          newJob.metadata = {}
-          newJob.metadata.name = obj.metadata.name .. "-retry-" .. os.time()
-          newJob.metadata.namespace = obj.metadata.namespace
-          
-          -- 2. Deep Copy & Sanitize Labels (CRITICAL)
-          -- We must remove system labels that bind this job to a specific execution
-          newJob.metadata.labels = {}
-          if obj.metadata.labels then
-             for k,v in pairs(obj.metadata.labels) do
-                if k ~= "controller-uid" and k ~= "job-name" and k ~= "batch.kubernetes.io/controller-uid" and k ~= "batch.kubernetes.io/job-name" then
-                   newJob.metadata.labels[k] = v
-                end
-             end
-          end
-          
-          -- 3. Copy Annotations (remove last-applied to be safe)
-          newJob.metadata.annotations = {}
-          if obj.metadata.annotations then
-             for k,v in pairs(obj.metadata.annotations) do
-                if k ~= "kubectl.kubernetes.io/last-applied-configuration" then
-                   newJob.metadata.annotations[k] = v
-                end
-             end
-          end
-          
-          -- 4. Copy Spec & Clean Selector
-          newJob.spec = obj.spec
-          newJob.spec.selector = nil
-          newJob.spec.template.metadata.labels["controller-uid"] = nil
-          newJob.spec.template.metadata.labels["job-name"] = nil
-          newJob.spec.template.metadata.labels["batch.kubernetes.io/controller-uid"] = nil
-          
-          -- 5. RETURN AS A LIST to force Apply/Create
-          return { newJob }
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  resource.customizations.ignoreDifferences.batch_Job: |
+    jsonPointers:
+    - /spec/template/metadata/labels/controller-uid
+  
+  # Define the custom action
+  resource.customizations.actions.batch_Job: |
+    discovery.lua: |
+      actions = {}
+      -- Only show the button if the user added the specific label
+      if obj.metadata.labels and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
+        actions["retry"] = {
+          name = "Retry Job",
+          title = "Retry",
+          disabled = false
+        }
+      end
+      return actions
+
+    definitions:
+    - name: retry
+      action.lua: |
+        local os = require("os")
+        
+        -- Create a copy of the existing object
+        local newObj = {}
+        newObj.apiVersion = obj.apiVersion
+        newObj.kind = obj.kind
+        newObj.metadata = {}
+        newObj.spec = obj.spec
+
+        -- Clean up metadata to ensure it's treated as a new object
+        -- We append a timestamp to the name to avoid collision
+        newObj.metadata.name = obj.metadata.name .. "-retry-" .. os.time()
+        newObj.metadata.namespace = obj.metadata.namespace
+        newObj.metadata.labels = obj.metadata.labels
+        
+        -- IMPORTANT: Clean up selector and controller-uid so K8s generates new ones
+        newObj.spec.selector = nil
+        newObj.spec.template.metadata.labels["controller-uid"] = nil
+        
+        -- Return the instruction to create this new resource
+        return {
+          k8s = {
+            version = "batch/v1",
+            kind = "Job",
+            operation = "create",
+            resource = newObj
+          }
+        }
