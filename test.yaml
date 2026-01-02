@@ -6,51 +6,84 @@ metadata:
 data:
   resource.customizations.actions.batch_Job: |
     discovery.lua: |
-      actions = {}
-      local status = obj.status or {}
-      if status.failed ~= nil or status.succeeded ~= nil then
-        table.insert(actions, {name = "retry", disabled = false})
+      local actions = {}
+
+      local completed = false
+      if obj.status ~= nil then
+        if obj.status.conditions ~= nil then
+          for i, condition in pairs(obj.status.conditions) do
+            if condition.type == "Complete" and condition.status == "True" then
+              completed = true
+            elseif condition.type == "Failed" and condition.status == "True" then
+              completed = true
+            elseif condition.type == "FailureTarget" and condition.status == "True" then
+              completed = true
+            elseif condition.type == "SuccessCriteriaMet" and condition.status == "True" then
+              completed = true
+            end
+          end
+        end
       end
+
+      if completed then
+        actions["retry"] = {["iconClass"] = "fa fa-fw fa-redo", ["displayName"] = "Retry Job"}
+      end
+
       return actions
     definitions:
-    - name: retry
-      action.lua: |
-        local os = require("os")
-        local job = {}
-        job.apiVersion = obj.apiVersion
-        job.kind = obj.kind
-        job.metadata = {}
-        job.metadata.name = obj.metadata.name .. "-retry-" .. tostring(os.time())
-        job.metadata.namespace = obj.metadata.namespace
-        if obj.metadata.labels then
-          job.metadata.labels = {}
-          for k, v in pairs(obj.metadata.labels) do
-            job.metadata.labels[k] = v
+      - name: retry
+        action.lua: |
+          local os = require("os")
+          
+          local job = {}
+          job.apiVersion = obj.apiVersion
+          job.kind = obj.kind
+          
+          job.metadata = {}
+          job.metadata.name = obj.metadata.name .. "-retry-" .. tostring(os.time())
+          job.metadata.namespace = obj.metadata.namespace
+          
+          if obj.metadata.labels ~= nil then
+            job.metadata.labels = {}
+            for k, v in pairs(obj.metadata.labels) do
+              job.metadata.labels[k] = v
+            end
           end
-        end
-        if obj.metadata.annotations then
-          job.metadata.annotations = {}
-          for k, v in pairs(obj.metadata.annotations) do
-            job.metadata.annotations[k] = v
+          
+          if obj.metadata.annotations ~= nil then
+            job.metadata.annotations = {}
+            for k, v in pairs(obj.metadata.annotations) do
+              job.metadata.annotations[k] = v
+            end
           end
-        end
-        job.metadata.labels["app.kubernetes.io/instance"] = obj.metadata.labels["app.kubernetes.io/instance"]
-        job.metadata.annotations["argocd.argoproj.io/compare-options"] = "IgnoreExtraneous"
-        job.spec = {}
-        job.spec.template = obj.spec.template
-        job.spec.backoffLimit = obj.spec.backoffLimit
-        job.spec.activeDeadlineSeconds = obj.spec.activeDeadlineSeconds
-        job.spec.ttlSecondsAfterFinished = obj.spec.ttlSecondsAfterFinished
-        if job.spec.template.metadata == nil then
-          job.spec.template.metadata = {}
-        end
-        if job.spec.template.metadata.labels then
-          job.spec.template.metadata.labels["controller-uid"] = nil
-          job.spec.template.metadata.labels["job-name"] = nil
-        end
-        return {
-          {
-            operation = "create",
-            resource = job
+          
+          if obj.metadata.labels ~= nil and obj.metadata.labels["app.kubernetes.io/instance"] ~= nil then
+            job.metadata.labels["app.kubernetes.io/instance"] = obj.metadata.labels["app.kubernetes.io/instance"]
+          end
+          
+          job.metadata.annotations = job.metadata.annotations or {}
+          job.metadata.annotations["argocd.argoproj.io/compare-options"] = "IgnoreExtraneous"
+          
+          job.spec = {}
+          job.spec.template = obj.spec.template
+          if obj.spec.backoffLimit ~= nil then
+            job.spec.backoffLimit = obj.spec.backoffLimit
+          end
+          if obj.spec.activeDeadlineSeconds ~= nil then
+            job.spec.activeDeadlineSeconds = obj.spec.activeDeadlineSeconds
+          end
+          if obj.spec.ttlSecondsAfterFinished ~= nil then
+            job.spec.ttlSecondsAfterFinished = obj.spec.ttlSecondsAfterFinished
+          end
+          
+          if job.spec.template.metadata ~= nil and job.spec.template.metadata.labels ~= nil then
+            job.spec.template.metadata.labels["controller-uid"] = nil
+            job.spec.template.metadata.labels["job-name"] = nil
+          end
+          
+          return {
+            {
+              operation = "create",
+              resource = job
+            }
           }
-        }
