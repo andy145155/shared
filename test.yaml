@@ -1,34 +1,43 @@
-data:
-  # ... other config ...
-
-  # CORRECT FORMATTING:
-  resource.customizations.actions.batch_Job: |
-    discovery.lua: |
-      actions = {}
-      if obj.metadata.labels and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
-        actions["retry-verification"] = {
-          ["title"] = "Retry Verification",
-          ["icon"] = "fa-redo",
-          ["description"] = "Creates a new copy of this job to re-run verification"
-        }
-      end
-      return actions
-
-    definitions:
+definitions:
       - name: retry-verification
         action.lua: |
           local os = require("os")
           local newJob = {}
+          
+          -- 1. Copy Basic Info
           newJob.apiVersion = obj.apiVersion
           newJob.kind = obj.kind
           newJob.metadata = {}
           newJob.metadata.name = obj.metadata.name .. "-retry-" .. os.time()
           newJob.metadata.namespace = obj.metadata.namespace
-          newJob.metadata.labels = obj.metadata.labels
-          newJob.metadata.annotations = obj.metadata.annotations
+          
+          -- 2. Deep Copy & Sanitize Labels (CRITICAL)
+          -- We must remove system labels that bind this job to a specific execution
+          newJob.metadata.labels = {}
+          if obj.metadata.labels then
+             for k,v in pairs(obj.metadata.labels) do
+                if k ~= "controller-uid" and k ~= "job-name" and k ~= "batch.kubernetes.io/controller-uid" and k ~= "batch.kubernetes.io/job-name" then
+                   newJob.metadata.labels[k] = v
+                end
+             end
+          end
+          
+          -- 3. Copy Annotations (remove last-applied to be safe)
+          newJob.metadata.annotations = {}
+          if obj.metadata.annotations then
+             for k,v in pairs(obj.metadata.annotations) do
+                if k ~= "kubectl.kubernetes.io/last-applied-configuration" then
+                   newJob.metadata.annotations[k] = v
+                end
+             end
+          end
+          
+          -- 4. Copy Spec & Clean Selector
           newJob.spec = obj.spec
           newJob.spec.selector = nil
-          if newJob.spec.template.metadata.labels then
-            newJob.spec.template.metadata.labels["controller-uid"] = nil
-          end
-          return newJob
+          newJob.spec.template.metadata.labels["controller-uid"] = nil
+          newJob.spec.template.metadata.labels["job-name"] = nil
+          newJob.spec.template.metadata.labels["batch.kubernetes.io/controller-uid"] = nil
+          
+          -- 5. RETURN AS A LIST to force Apply/Create
+          return { newJob }
