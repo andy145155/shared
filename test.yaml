@@ -1,8 +1,8 @@
-# The key MUST be exactly "resource.customizations.actions.batch_Job"
+kubectl patch configmap argocd-cm -n argocd --type merge -p '
+data:
   resource.customizations.actions.batch_Job: |
     discovery.lua: |
       actions = {}
-      -- Ensure the label matches what is on your resource
       if obj.metadata.labels and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
         actions["retry"] = {
           name = "Retry Job",
@@ -11,31 +11,20 @@
         }
       end
       return actions
-
-    # IMPORTANT: This 'definitions' line must match the indentation of 'discovery.lua' above
     definitions:
     - name: retry
       action.lua: |
         local os = require("os")
         local newObj = {}
-        
-        -- Copy basic fields
         newObj.apiVersion = obj.apiVersion
         newObj.kind = obj.kind
-        newObj.spec = obj.spec
-        
-        -- Create clean metadata
         newObj.metadata = {}
         newObj.metadata.name = obj.metadata.name .. "-retry-" .. os.time()
         newObj.metadata.namespace = obj.metadata.namespace
-        
-        -- Copy labels but NOT annotations (to avoid copying the PostSync hook annotation)
         newObj.metadata.labels = obj.metadata.labels
-        
-        -- Clean up selector/uid so K8s sees this as a fresh Job
+        newObj.spec = obj.spec
         newObj.spec.selector = nil
         newObj.spec.template.metadata.labels["controller-uid"] = nil
-        
         return {
           k8s = {
             version = "batch/v1",
@@ -44,3 +33,4 @@
             resource = newObj
           }
         }
+'
