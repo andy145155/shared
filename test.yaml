@@ -1,36 +1,62 @@
-kubectl patch configmap argocd-cm -n argocd --type merge -p '
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
 data:
   resource.customizations.actions.batch_Job: |
     discovery.lua: |
+      -- Discover available actions for Jobs
       actions = {}
-      if obj.metadata.labels and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
-        actions["retry"] = {
-          name = "Retry Job",
-          title = "Retry",
-          disabled = false
-        }
+      local status = obj.status or {}
+      -- Show "Retry" action if the job has failed or completed
+      if status.failed ~= nil or status.succeeded ~= nil then
+        table.insert(actions, {name = "retry", disabled = false})
       end
       return actions
     definitions:
-    - name: retry
-      action.lua: |
-        local os = require("os")
-        local newObj = {}
-        newObj.apiVersion = obj.apiVersion
-        newObj.kind = obj.kind
-        newObj.metadata = {}
-        newObj.metadata.name = obj.metadata.name .. "-retry-" .. os.time()
-        newObj.metadata.namespace = obj.metadata.namespace
-        newObj.metadata.labels = obj.metadata.labels
-        newObj.spec = obj.spec
-        newObj.spec.selector = nil
-        newObj.spec.template.metadata.labels["controller-uid"] = nil
-        return {
-          k8s = {
-            version = "batch/v1",
-            kind = "Job",
-            operation = "create",
-            resource = newObj
+      - name: retry
+        action.lua: |
+          -- To retry a Job, we need to:
+          -- 1. Delete the old Job (by returning nil, ArgoCD will delete it)
+          -- 2. Create a new Job with the same spec
+          
+          -- Create a copy of the Job for the new attempt
+          local newJob = {}
+          newJob.apiVersion = obj.apiVersion
+          newJob.kind = obj.kind
+          newJob.metadata = {}
+          newJob.metadata.name = obj.metadata.name
+          newJob.metadata.namespace = obj.metadata.namespace
+          newJob.metadata.labels = obj.metadata.labels
+          newJob.metadata.annotations = obj.metadata.annotations
+          
+          -- Copy the spec
+          newJob.spec = obj.spec
+          
+          -- Clear status fields and pod selector (required for retry)
+          newJob.spec.selector = nil
+          if newJob.spec.template and newJob.spec.template.metadata then
+            newJob.spec.template.metadata.labels = {}
+            -- Preserve non-job-related labels
+            if obj.spec.template.metadata.labels then
+              for k, v in pairs(obj.spec.template.metadata.labels) do
+                if not string.find(k, "controller-uid") and not string.find(k, "job-name") then
+                  newJob.spec.template.metadata.labels[k] = v
+                end
+              end
+            end
+          end
+          
+          -- Return the result that creates a new Job
+          -- Setting impactedResource to delete the old one
+          return {
+            {
+              action = "delete",
+              resource = obj
+            },
+            {
+              action = "create",
+              resource = newJob
+            }
           }
-        }
-'
