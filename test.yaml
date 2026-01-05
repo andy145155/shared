@@ -49,7 +49,12 @@ data:
 
           if obj then
             local baseName = obj.metadata.name or "job"
-            if #baseName > 40 then baseName = baseName:sub(1, 40) end
+            -- FIX: Use string.sub instead of baseName:sub
+            if #baseName > 40 then 
+                if string and string.sub then
+                    baseName = string.sub(baseName, 1, 40) 
+                end
+            end
 
             local newJob = {
               apiVersion = "batch/v1",
@@ -69,14 +74,15 @@ data:
             labels["job-name"] = nil
             labels["batch.kubernetes.io/job-name"] = nil
             
-            -- 2. AUTO-LINKING LOGIC
-            -- Parse the Application Name from the original tracking-id
+            -- 2. AUTO-LINKING LOGIC (Fixed for restricted Lua)
             if obj.metadata.annotations and obj.metadata.annotations["argocd.argoproj.io/tracking-id"] then
                local trackId = obj.metadata.annotations["argocd.argoproj.io/tracking-id"]
-               -- Grab everything before the first colon (:)
-               local appName = trackId:match("^(.-):")
-               if appName then
-                  labels["app.kubernetes.io/instance"] = appName
+               -- FIX: Use string.match instead of trackId:match
+               if string and string.match then
+                   local appName = string.match(trackId, "^(.-):")
+                   if appName then
+                      labels["app.kubernetes.io/instance"] = appName
+                   end
                end
             end
             
