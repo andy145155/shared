@@ -20,7 +20,6 @@ data:
           local os = require("os")
           local result = {}
 
-          -- 1. Robust Deep Copy (Handles edge cases safely)
           local function deepCopy(obj)
             local lookup = {}
             local function _copy(o)
@@ -35,25 +34,22 @@ data:
           end
 
           if obj then
-            -- 2. Safe Name (Uses # operator to avoid string library nil errors)
             local baseName = obj.metadata.name or "job"
             if #baseName > 40 then baseName = baseName:sub(1, 40) end
-            
-            -- 3. Construct New Job Manually (Prevents circular JSON errors)
+
             local newJob = {
               apiVersion = "batch/v1",
               kind = "Job",
               metadata = {},
               spec = deepCopy(obj.spec or {})
             }
-            
             newJob.metadata.name = baseName .. "-rst-" .. os.time()
             newJob.metadata.namespace = obj.metadata.namespace
             
             -- Copy Labels
             newJob.metadata.labels = deepCopy(obj.metadata.labels or {})
             newJob.metadata.labels["argocd-action"] = "restarted-job"
-            
+
             -- Clean Annotations
             if obj.metadata.annotations then
               newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
@@ -61,16 +57,32 @@ data:
               newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = nil
               newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
             end
-            
+
             -- Clean Spec
             newJob.spec.selector = nil
             if newJob.spec.template then
                if not newJob.spec.template.metadata then newJob.spec.template.metadata = {} end
-               -- FIX: Deep Copy here instead of assigning (=). 
-               -- This prevents "recursively nested tables" JSON errors.
                newJob.spec.template.metadata.labels = deepCopy(newJob.metadata.labels)
+               
+               -- === FIX FOR "cannot unmarshal array" ERROR ===
+               -- This removes empty 'resources' tables so they don't become '[]' in JSON
+               if newJob.spec.template.spec then
+                 local function cleanContainers(containers)
+                   if containers then
+                     for _, c in pairs(containers) do
+                       -- If resources is empty table, set to nil to avoid JSON array serialization
+                       if c.resources and next(c.resources) == nil then
+                         c.resources = nil
+                       end
+                     end
+                   end
+                 end
+                 cleanContainers(newJob.spec.template.spec.containers)
+                 cleanContainers(newJob.spec.template.spec.initContainers)
+               end
+               -- ==============================================
             end
-            
+
             result[1] = { operation = "create", resource = newJob }
           end
           return result
