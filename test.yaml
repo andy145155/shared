@@ -4,9 +4,11 @@ metadata:
   name: argocd-cm
   namespace: argocd
 data:
+  # The key must be exactly this
   resource.customizations.actions.batch_Job: |
     discovery.lua: |
       actions = {}
+      -- 1. Check if the job has your specific label
       if obj.metadata.labels and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
         actions["retry"] = {
           name = "Retry Verification",
@@ -15,28 +17,39 @@ data:
         }
       end
       return actions
+
     definitions:
     - name: retry
       action.lua: |
         local os = require("os")
         local newJob = {}
+        
+        -- 2. Basic Fields
         newJob.apiVersion = "batch/v1"
         newJob.kind = "Job"
+        
+        -- 3. Create Unique Name
         newJob.metadata = {}
         newJob.metadata.name = obj.metadata.name .. "-retry-" .. os.time()
         newJob.metadata.namespace = obj.metadata.namespace
+        
+        -- 4. Safe Label Copy (Manually copying to avoid reference issues)
         newJob.metadata.labels = {}
         if obj.metadata.labels then
           for k,v in pairs(obj.metadata.labels) do
             newJob.metadata.labels[k] = v
           end
         end
+        -- Remove system labels that would cause conflicts
         newJob.metadata.labels["controller-uid"] = nil
         newJob.metadata.labels["job-name"] = nil
+        
+        -- 5. Copy Spec & Clean Selector
         newJob.spec = obj.spec
         newJob.spec.selector = nil
         newJob.spec.template.metadata.labels["controller-uid"] = nil
         newJob.spec.template.metadata.labels["job-name"] = nil
+
         return {
           k8s = {
             version = "batch/v1",
