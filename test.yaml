@@ -4,86 +4,74 @@ metadata:
   name: argocd-cm
   namespace: argocd
 data:
+  # 1. DISCOVERY: Only show button on Jobs with your specific label
   resource.customizations.actions.batch_Job: |
     discovery.lua: |
-      local actions = {}
-
-      local completed = false
-      if obj.status ~= nil then
-        if obj.status.conditions ~= nil then
-          for i, condition in pairs(obj.status.conditions) do
-            if condition.type == "Complete" and condition.status == "True" then
-              completed = true
-            elseif condition.type == "Failed" and condition.status == "True" then
-              completed = true
-            elseif condition.type == "FailureTarget" and condition.status == "True" then
-              completed = true
-            elseif condition.type == "SuccessCriteriaMet" and condition.status == "True" then
-              completed = true
-            end
-          end
-        end
+      actions = {}
+      if obj.metadata.labels and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
+        actions["retry"] = {
+          name = "Retry Verification",
+          title = "Retry Verification",
+          disabled = false
+        }
       end
-
-      if completed then
-        actions["retry"] = {["iconClass"] = "fa fa-fw fa-redo", ["displayName"] = "Retry Job"}
-      end
-
       return actions
+
     definitions:
-      - name: retry
-        action.lua: |
-          local os = require("os")
-          
-          -- Deep copy function to properly copy nested tables
-          function deepCopy(original)
-            local copy
-            if type(original) == 'table' then
-              copy = {}
-              for orig_key, orig_value in next, original, nil do
-                copy[deepCopy(orig_key)] = deepCopy(orig_value)
-              end
-              setmetatable(copy, deepCopy(getmetatable(original)))
+    - name: retry
+      action.lua: |
+        local os = require("os")
+
+        -- UTILITY: Deep Copy (Taken from official Argo CD CronJob example)
+        -- This ensures we don't mess up references when copying the spec
+        local function deepCopy(object)
+          local lookup_table = {}
+          local function _copy(obj)
+            if type(obj) ~= "table" then return obj
+            elseif lookup_table[obj] then return lookup_table[obj]
+            elseif next(obj) == nil then return nil
             else
-              copy = original
-            end
-            return copy
-          end
-          
-          -- Create a deep copy of the entire object
-          local job = deepCopy(obj)
-          
-          -- Update the name with retry suffix
-          job.metadata.name = obj.metadata.name .. "-retry-" .. tostring(os.time())
-          
-          -- Clear fields that should not be copied
-          job.metadata.uid = nil
-          job.metadata.resourceVersion = nil
-          job.metadata.creationTimestamp = nil
-          job.metadata.generation = nil
-          job.metadata.managedFields = nil
-          job.status = nil
-          
-          -- Clear selector to let k8s generate new one
-          job.spec.selector = nil
-          
-          -- Clear controller-uid from pod template
-          if job.spec.template.metadata ~= nil then
-            if job.spec.template.metadata.labels ~= nil then
-              job.spec.template.metadata.labels["controller-uid"] = nil
-              job.spec.template.metadata.labels["batch.kubernetes.io/controller-uid"] = nil
-              job.spec.template.metadata.labels["job-name"] = nil
-              job.spec.template.metadata.labels["batch.kubernetes.io/job-name"] = nil
+              local new_table = {}
+              lookup_table[obj] = new_table
+              for key, value in pairs(obj) do
+                new_table[_copy(key)] = _copy(value)
+              end
+              return setmetatable(new_table, getmetatable(obj))
             end
           end
-          
-          -- Add annotation to prevent sync issues
-          job.metadata.annotations = job.metadata.annotations or {}
-          job.metadata.annotations["argocd.argoproj.io/compare-options"] = "IgnoreExtraneous"
-          
-          return {
-            {
-              operation = "create",
-              resource = job
-            }
+          return _copy(object)
+        end
+
+        -- LOGIC: Create a new Job based on the existing one
+        local newJob = {}
+        newJob.apiVersion = "batch/v1"
+        newJob.kind = "Job"
+        
+        -- 1. Create unique name
+        newJob.metadata = {}
+        newJob.metadata.name = obj.metadata.name .. "-retry-" .. os.time()
+        newJob.metadata.namespace = obj.metadata.namespace
+        
+        -- 2. Copy labels (but remove system-generated ones)
+        if obj.metadata.labels then
+          newJob.metadata.labels = deepCopy(obj.metadata.labels)
+          newJob.metadata.labels["controller-uid"] = nil
+          newJob.metadata.labels["job-name"] = nil
+        end
+        
+        -- 3. Copy Spec (Critical: This brings over your container/command config)
+        newJob.spec = deepCopy(obj.spec)
+        
+        -- 4. Clean up Spec to ensure K8s treats it as a fresh job
+        newJob.spec.selector = nil
+        newJob.spec.template.metadata.labels["controller-uid"] = nil
+        newJob.spec.template.metadata.labels["job-name"] = nil
+
+        return {
+          k8s = {
+            version = "batch/v1",
+            kind = "Job",
+            operation = "create",
+            resource = newJob
           }
+        }
