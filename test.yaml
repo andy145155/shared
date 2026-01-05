@@ -35,17 +35,13 @@ data:
           end
 
           -- 2. Helper: Clean Empty Tables
-          -- Removes empty tables {} so they don't become [] and crash K8s
           local function cleanPodSpec(podSpec)
             if not podSpec then return end
-
-            -- Clean Pod-Level Objects
             if podSpec.securityContext and next(podSpec.securityContext) == nil then podSpec.securityContext = nil end
             if podSpec.nodeSelector and next(podSpec.nodeSelector) == nil then podSpec.nodeSelector = nil end
             if podSpec.affinity and next(podSpec.affinity) == nil then podSpec.affinity = nil end
             if podSpec.tolerations and next(podSpec.tolerations) == nil then podSpec.tolerations = nil end
 
-            -- Clean Container-Level Objects
             local function cleanContainers(containers)
               if not containers then return end
               for _, c in pairs(containers) do
@@ -54,7 +50,6 @@ data:
                 if c.lifecycle and next(c.lifecycle) == nil then c.lifecycle = nil end
               end
             end
-
             cleanContainers(podSpec.containers)
             cleanContainers(podSpec.initContainers)
           end
@@ -74,8 +69,15 @@ data:
             -- Set Metadata
             newJob.metadata.name = baseName .. "-rst-" .. os.time()
             newJob.metadata.namespace = obj.metadata.namespace
-            newJob.metadata.labels = deepCopy(obj.metadata.labels or {})
-            newJob.metadata.labels["argocd-action"] = "restarted-job"
+            
+            -- Copy Labels BUT STRIP SYSTEM LABELS
+            local labels = deepCopy(obj.metadata.labels or {})
+            labels["controller-uid"] = nil
+            labels["batch.kubernetes.io/controller-uid"] = nil
+            labels["job-name"] = nil
+            labels["batch.kubernetes.io/job-name"] = nil
+            labels["argocd-action"] = "restarted-job"
+            newJob.metadata.labels = labels
 
             -- Clean Annotations
             if obj.metadata.annotations then
@@ -87,8 +89,12 @@ data:
 
             -- Reset Spec
             newJob.spec.selector = nil
+            newJob.spec.template.metadata.creationTimestamp = nil -- Ensure this is nil
+            
             if newJob.spec.template then
                if not newJob.spec.template.metadata then newJob.spec.template.metadata = {} end
+               
+               -- Sync cleaned labels to pod template
                newJob.spec.template.metadata.labels = deepCopy(newJob.metadata.labels)
                
                -- RUN THE CLEANER
