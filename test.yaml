@@ -19,11 +19,6 @@ data:
         action.lua: |
           local os = require("os")
           local result = {}
-
-          -- 1. Hardcoded App Name (Derived from your screenshot)
-          -- This is required because we cannot parse strings in your environment.
-          local myAppName = "hk-ptdev-crossenv.external-dns"
-
           local function deepCopy(obj)
             local lookup = {}
             local function _copy(o)
@@ -36,7 +31,6 @@ data:
             end
             return _copy(obj)
           end
-
           local function cleanPodSpec(podSpec)
             if not podSpec then return end
             if podSpec.securityContext and next(podSpec.securityContext) == nil then podSpec.securityContext = nil end
@@ -50,53 +44,38 @@ data:
             cleanContainers(podSpec.containers)
             cleanContainers(podSpec.initContainers)
           end
-
           if obj then
-            local baseName = obj.metadata.name or "job"
-            
-            -- Note: We cannot truncate safely without string lib, 
-            -- so we use a very short suffix to minimize risk of "Name too long" errors.
-            local newName = baseName .. "-r" .. os.time()
-
+            local suffix = "-retry-" .. os.time()
+            local newName = obj.metadata.name .. suffix
             local newJob = {
               apiVersion = "batch/v1",
               kind = "Job",
               metadata = {},
               spec = deepCopy(obj.spec or {})
             }
-
             newJob.metadata.name = newName
             newJob.metadata.namespace = obj.metadata.namespace
-            
             local labels = deepCopy(obj.metadata.labels or {})
-            
-            -- 2. Strip System Labels (Fixes Ghost Job)
             labels["controller-uid"] = nil
             labels["batch.kubernetes.io/controller-uid"] = nil
             labels["job-name"] = nil
             labels["batch.kubernetes.io/job-name"] = nil
-            
-            -- 3. FORCE APP LINKING (Fixes Visibility)
-            labels["app.kubernetes.io/instance"] = myAppName
             labels["argocd-action"] = "restarted-job"
-            
             newJob.metadata.labels = labels
-
-            -- 4. Clean Annotations (Safety)
             if obj.metadata.annotations then
               newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
-              -- Do NOT include tracking-id (prevents sync conflicts)
-              newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = nil
               newJob.metadata.annotations["argocd.argoproj.io/hook"] = nil
+              newJob.metadata.annotations["argocd.argoproj.io/hook-delete-policy"] = nil
               newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
-              -- Prevent Auto-Deletion
+              if newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] then
+                 local oldId = newJob.metadata.annotations["argocd.argoproj.io/tracking-id"]
+                 newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = oldId .. suffix
+              end
               newJob.metadata.annotations["argocd.argoproj.io/sync-options"] = "Prune=false"
             else
               newJob.metadata.annotations = {}
               newJob.metadata.annotations["argocd.argoproj.io/sync-options"] = "Prune=false"
             end
-
-            -- Reset Spec
             newJob.spec.selector = nil
             newJob.spec.template.metadata.creationTimestamp = nil
             if newJob.spec.template then
@@ -104,7 +83,6 @@ data:
                newJob.spec.template.metadata.labels = deepCopy(newJob.metadata.labels)
                if newJob.spec.template.spec then cleanPodSpec(newJob.spec.template.spec) end
             end
-
             result[1] = { operation = "create", resource = newJob }
           end
           return result
