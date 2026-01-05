@@ -17,31 +17,37 @@ data:
         message: Restarting Job by creating a fresh copy...
         icon: replay
     action.lua: |
-      local result={}
+      local os = require("os")
+      local result = {}
       local function deepCopy(orig)
-        if type(orig)~='table' then return orig end
-        local copy={}
-        for k,v in pairs(orig) do copy[deepCopy(k)]=deepCopy(v) end
+        if type(orig) ~= 'table' then return orig end
+        local copy = {}
+        for k, v in pairs(orig) do copy[deepCopy(k)] = deepCopy(v) end
         return copy
       end
       if obj then
-        local newJob={apiVersion="batch/v1",kind="Job",metadata={},spec=deepCopy(obj.spec or {})}
-        local name=obj.metadata.name or "job"
-        if string.len(name)>40 then name=string.sub(name,1,40) end
-        newJob.metadata.name=name.."-rst-"..os.date("%Y%m%d%H%M%S")
-        newJob.metadata.namespace=obj.metadata.namespace
-        newJob.metadata.labels=deepCopy(obj.metadata.labels or {})
-        newJob.metadata.labels["argocd-action"]="restarted-job"
+        local newJob = {
+          apiVersion = "batch/v1",
+          kind = "Job",
+          metadata = {},
+          spec = deepCopy(obj.spec or {})
+        }
+        local name = obj.metadata.name or "job"
+        if string.len(name) > 40 then name = string.sub(name, 1, 40) end
+        newJob.metadata.name = name .. "-rst-" .. os.date("%Y%m%d%H%M%S")
+        newJob.metadata.namespace = obj.metadata.namespace
+        newJob.metadata.labels = deepCopy(obj.metadata.labels or {})
+        newJob.metadata.labels["argocd-action"] = "restarted-job"
         if obj.metadata.annotations then
-          newJob.metadata.annotations=deepCopy(obj.metadata.annotations)
-          newJob.metadata.annotations["argocd.argoproj.io/hook"]=nil
-          newJob.metadata.annotations["argocd.argoproj.io/tracking-id"]=nil
-          newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"]=nil
+          newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
+          newJob.metadata.annotations["argocd.argoproj.io/hook"] = nil
+          newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = nil
+          newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
         end
-        newJob.spec.selector=nil
+        newJob.spec.selector = nil
         if newJob.spec.template and newJob.spec.template.metadata then
-          newJob.spec.template.metadata.labels=newJob.metadata.labels
+          newJob.spec.template.metadata.labels = newJob.metadata.labels
         end
-        result[1]={operation="create",resource=newJob}
+        result[1] = { operation = "create", resource = newJob }
       end
       return result
