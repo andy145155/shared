@@ -5,39 +5,27 @@ metadata:
   namespace: argocd
 data:
   resource.customizations.actions.batch_Job: |
-    # 1. Discovery: Control when the button is shown
+    # 1. Discovery: Check for the specific label
     discovery.lua: |
       actions = {}
-      -- Only show "Restart" on Jobs that have finished (Complete or Failed)
-      -- You can remove this check if you want to restart running jobs too
-      local status = "Running"
-      if obj.status ~= nil then
-        if obj.status.succeeded ~= nil and obj.status.succeeded > 0 then
-          status = "Completed"
-        elseif obj.status.failed ~= nil and obj.status.failed > 0 then
-          status = "Failed"
-        end
-      end
-      
-      actions["restart"] = {}
-      if status == "Running" then
-        actions["restart"]["disabled"] = true
-        actions["restart"]["message"] = "Job is still running."
+      -- Safely check if labels exist, then check for the specific key/value
+      if obj.metadata.labels ~= nil and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
+        actions["restart"] = {}
       end
       return actions
 
-    # 2. Definitions: Define the UI button
+    # 2. Definitions: UI Configuration
     definitions:
       - name: restart
         title: Restart Job
         message: Creating a new Job from this spec...
         icon: replay
 
-    # 3. Action Logic: The code to run
+    # 3. Action Logic: (Same as before)
     action.lua: |
       local os = require("os")
 
-      -- Helper to deep copy tables (needed for copying the spec)
+      -- Deep copy helper
       function deepCopy(object)
           local lookup_table = {}
           local function _copy(obj)
@@ -56,14 +44,12 @@ data:
           return _copy(object)
       end
 
-      -- Initialize the new Job object
       local newJob = {}
       newJob.apiVersion = "batch/v1"
       newJob.kind = "Job"
       newJob.metadata = {}
       
-      -- Create a unique name: original-name-restart-timestamp
-      -- Truncate original name if too long to avoid K8s limit (63 chars)
+      -- Generate unique name
       local baseName = obj.metadata.name
       if string.len(baseName) > 45 then
         baseName = string.sub(baseName, 1, 45)
@@ -71,33 +57,28 @@ data:
       newJob.metadata.name = baseName .. "-rst-" .. os.date("%Y%m%d%H%M%S")
       newJob.metadata.namespace = obj.metadata.namespace
 
-      -- Copy Labels (Optional: Add a tracking label)
+      -- Copy Labels
       if obj.metadata.labels ~= nil then
         newJob.metadata.labels = deepCopy(obj.metadata.labels)
       else
         newJob.metadata.labels = {}
       end
+      -- Ensure the new job also has the retryable label (optional, keeps it restartable)
       newJob.metadata.labels["argocd-action"] = "restarted-job"
 
-      -- Handle Annotations
-      -- We specifically exclude the 'argocd.argoproj.io/hook' annotation.
-      -- If we kept it, ArgoCD might get confused thinking this ad-hoc job 
-      -- is part of the current sync lifecycle.
+      -- Handle Annotations (Strip ArgoCD hooks/tracking)
       if obj.metadata.annotations ~= nil then
         newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
         newJob.metadata.annotations["argocd.argoproj.io/hook"] = nil
         newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
-        newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = nil -- Prevent tracking conflicts
+        newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = nil
       end
 
-      -- Copy the Spec
+      -- Copy Spec
       newJob.spec = deepCopy(obj.spec)
+      newJob.spec.selector = nil -- Let k8s generate a new selector
+      newJob.spec.template.metadata.labels = newJob.metadata.labels
 
-      -- cleanup specific fields that shouldn't be copied
-      newJob.spec.selector = nil
-      newJob.spec.template.metadata.labels = newJob.metadata.labels -- Align pod labels
-
-      -- Construct the return object
       local result = {}
       result[1] = {
         operation = "create",
