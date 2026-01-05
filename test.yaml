@@ -5,82 +5,43 @@ metadata:
   namespace: argocd
 data:
   resource.customizations.actions.batch_Job: |
-    # 1. Discovery
     discovery.lua: |
       actions = {}
       if obj.metadata.labels and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
         actions["restart"] = {}
       end
       return actions
-
-    # 2. Definitions
     definitions:
       - name: restart
         title: Restart Job
         message: Restarting Job by creating a fresh copy...
         icon: replay
-
-    # 3. Action Logic (Defensive Version)
     action.lua: |
-      local os = require("os")
-      local result = {}
-
-      -- 1. Check if obj exists to prevent immediate crash
-      if obj == nil then return result end
-
-      -- 2. Simple DeepCopy function
+      local result={}
       local function deepCopy(orig)
-        if type(orig) ~= 'table' then return orig end
-        local copy = {}
-        for k, v in pairs(orig) do copy[deepCopy(k)] = deepCopy(v) end
+        if type(orig)~='table' then return orig end
+        local copy={}
+        for k,v in pairs(orig) do copy[deepCopy(k)]=deepCopy(v) end
         return copy
       end
-
-      -- 3. Prepare the new Job
-      local newJob = {
-        apiVersion = "batch/v1",
-        kind = "Job",
-        metadata = {},
-        spec = {}
-      }
-
-      -- 4. Create Unique Name
-      local name = obj.metadata.name or "job"
-      if string.len(name) > 40 then name = string.sub(name, 1, 40) end
-      newJob.metadata.name = name .. "-" .. os.time()
-      newJob.metadata.namespace = obj.metadata.namespace
-
-      -- 5. Copy Metadata (Labels/Annotations)
-      if obj.metadata.labels then 
-        newJob.metadata.labels = deepCopy(obj.metadata.labels) 
+      if obj then
+        local newJob={apiVersion="batch/v1",kind="Job",metadata={},spec=deepCopy(obj.spec or {})}
+        local name=obj.metadata.name or "job"
+        if string.len(name)>40 then name=string.sub(name,1,40) end
+        newJob.metadata.name=name.."-rst-"..os.date("%Y%m%d%H%M%S")
+        newJob.metadata.namespace=obj.metadata.namespace
+        newJob.metadata.labels=deepCopy(obj.metadata.labels or {})
+        newJob.metadata.labels["argocd-action"]="restarted-job"
+        if obj.metadata.annotations then
+          newJob.metadata.annotations=deepCopy(obj.metadata.annotations)
+          newJob.metadata.annotations["argocd.argoproj.io/hook"]=nil
+          newJob.metadata.annotations["argocd.argoproj.io/tracking-id"]=nil
+          newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"]=nil
+        end
+        newJob.spec.selector=nil
+        if newJob.spec.template and newJob.spec.template.metadata then
+          newJob.spec.template.metadata.labels=newJob.metadata.labels
+        end
+        result[1]={operation="create",resource=newJob}
       end
-      if obj.metadata.annotations then 
-        newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
-        -- Strip ArgoCD hooks so the new job isn't treated as part of the sync
-        newJob.metadata.annotations["argocd.argoproj.io/hook"] = nil
-        newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = nil
-        newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
-      end
-
-      -- 6. Copy Spec (Defensive Checks)
-      if obj.spec then
-        newJob.spec = deepCopy(obj.spec)
-        -- Clear selector to let K8s generate a new one (Immutable field)
-        newJob.spec.selector = nil 
-        
-        -- Ensure template structure exists before modifying
-        if newJob.spec.template == nil then newJob.spec.template = {} end
-        if newJob.spec.template.metadata == nil then newJob.spec.template.metadata = {} end
-        
-        -- Sync labels to pod template
-        newJob.spec.template.metadata.labels = newJob.metadata.labels
-      end
-
-      -- 7. Construct Result
-      result[1] = {
-        operation = "create",
-        resource = newJob
-      }
-
-      -- 8. Final Return (MUST BE INDENTED CORRECTLY)
       return result
