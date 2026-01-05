@@ -5,86 +5,82 @@ metadata:
   namespace: argocd
 data:
   resource.customizations.actions.batch_Job: |
-    # 1. Discovery (Unchanged - keeps your label check)
+    # 1. Discovery
     discovery.lua: |
       actions = {}
-      if obj.metadata.labels ~= nil and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
+      if obj.metadata.labels and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
         actions["restart"] = {}
       end
       return actions
 
-    # 2. Definitions (Unchanged)
+    # 2. Definitions
     definitions:
       - name: restart
         title: Restart Job
-        message: Creating a new Job from this spec...
+        message: Restarting Job by creating a fresh copy...
         icon: replay
 
-    # 3. Action Logic (Fixed & Robust)
+    # 3. Action Logic (Defensive Version)
     action.lua: |
       local os = require("os")
-      
-      -- Simplified Deep Copy (Safe for K8s objects)
+      local result = {}
+
+      -- 1. Check if obj exists to prevent immediate crash
+      if obj == nil then return result end
+
+      -- 2. Simple DeepCopy function
       local function deepCopy(orig)
-          local orig_type = type(orig)
-          local copy
-          if orig_type == 'table' then
-              copy = {}
-              for orig_key, orig_value in next, orig, nil do
-                  copy[deepCopy(orig_key)] = deepCopy(orig_value)
-              end
-          else -- number, string, boolean, etc
-              copy = orig
-          end
-          return copy
+        if type(orig) ~= 'table' then return orig end
+        local copy = {}
+        for k, v in pairs(orig) do copy[deepCopy(k)] = deepCopy(v) end
+        return copy
       end
 
-      -- Initialize new Job
-      local newJob = {}
-      newJob.apiVersion = "batch/v1"
-      newJob.kind = "Job"
-      newJob.metadata = {}
-      
-      -- Generate Name (Safe Length)
-      local baseName = obj.metadata.name
-      if string.len(baseName) > 40 then
-        baseName = string.sub(baseName, 1, 40)
-      end
-      -- Use os.time() as a fallback for uniqueness
-      newJob.metadata.name = baseName .. "-rst-" .. os.time()
+      -- 3. Prepare the new Job
+      local newJob = {
+        apiVersion = "batch/v1",
+        kind = "Job",
+        metadata = {},
+        spec = {}
+      }
+
+      -- 4. Create Unique Name
+      local name = obj.metadata.name or "job"
+      if string.len(name) > 40 then name = string.sub(name, 1, 40) end
+      newJob.metadata.name = name .. "-" .. os.time()
       newJob.metadata.namespace = obj.metadata.namespace
 
-      -- Copy Labels
-      if obj.metadata.labels then
-        newJob.metadata.labels = deepCopy(obj.metadata.labels)
-      else
-        newJob.metadata.labels = {}
+      -- 5. Copy Metadata (Labels/Annotations)
+      if obj.metadata.labels then 
+        newJob.metadata.labels = deepCopy(obj.metadata.labels) 
       end
-      newJob.metadata.labels["argocd-action"] = "restarted-job"
-
-      -- Handle Annotations (Strip Hooks/Tracking)
-      if obj.metadata.annotations then
+      if obj.metadata.annotations then 
         newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
+        -- Strip ArgoCD hooks so the new job isn't treated as part of the sync
         newJob.metadata.annotations["argocd.argoproj.io/hook"] = nil
-        newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
         newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = nil
+        newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
       end
 
-      -- Copy Spec
+      -- 6. Copy Spec (Defensive Checks)
       if obj.spec then
         newJob.spec = deepCopy(obj.spec)
-        newJob.spec.selector = nil -- Reset selector
+        -- Clear selector to let K8s generate a new one (Immutable field)
+        newJob.spec.selector = nil 
         
-        -- Safe label assignment for the pod template
-        if newJob.spec.template and newJob.spec.template.metadata then
-             newJob.spec.template.metadata.labels = newJob.metadata.labels
-        end
+        -- Ensure template structure exists before modifying
+        if newJob.spec.template == nil then newJob.spec.template = {} end
+        if newJob.spec.template.metadata == nil then newJob.spec.template.metadata = {} end
+        
+        -- Sync labels to pod template
+        newJob.spec.template.metadata.labels = newJob.metadata.labels
       end
 
-      -- Return Result
-      local result = {}
+      -- 7. Construct Result
       result[1] = {
         operation = "create",
         resource = newJob
       }
+
+      -- 8. Final Return (MUST BE INDENTED CORRECTLY)
       return result
