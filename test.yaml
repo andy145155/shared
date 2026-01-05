@@ -4,7 +4,6 @@ metadata:
   name: argocd-cm
   namespace: argocd
 data:
-  # 1. DISCOVERY: Only show button on Jobs with your specific label
   resource.customizations.actions.batch_Job: |
     discovery.lua: |
       actions = {}
@@ -16,57 +15,28 @@ data:
         }
       end
       return actions
-
     definitions:
     - name: retry
       action.lua: |
         local os = require("os")
-
-        -- UTILITY: Deep Copy (Taken from official Argo CD CronJob example)
-        -- This ensures we don't mess up references when copying the spec
-        local function deepCopy(object)
-          local lookup_table = {}
-          local function _copy(obj)
-            if type(obj) ~= "table" then return obj
-            elseif lookup_table[obj] then return lookup_table[obj]
-            elseif next(obj) == nil then return nil
-            else
-              local new_table = {}
-              lookup_table[obj] = new_table
-              for key, value in pairs(obj) do
-                new_table[_copy(key)] = _copy(value)
-              end
-              return setmetatable(new_table, getmetatable(obj))
-            end
-          end
-          return _copy(object)
-        end
-
-        -- LOGIC: Create a new Job based on the existing one
         local newJob = {}
         newJob.apiVersion = "batch/v1"
         newJob.kind = "Job"
-        
-        -- 1. Create unique name
         newJob.metadata = {}
         newJob.metadata.name = obj.metadata.name .. "-retry-" .. os.time()
         newJob.metadata.namespace = obj.metadata.namespace
-        
-        -- 2. Copy labels (but remove system-generated ones)
+        newJob.metadata.labels = {}
         if obj.metadata.labels then
-          newJob.metadata.labels = deepCopy(obj.metadata.labels)
-          newJob.metadata.labels["controller-uid"] = nil
-          newJob.metadata.labels["job-name"] = nil
+          for k,v in pairs(obj.metadata.labels) do
+            newJob.metadata.labels[k] = v
+          end
         end
-        
-        -- 3. Copy Spec (Critical: This brings over your container/command config)
-        newJob.spec = deepCopy(obj.spec)
-        
-        -- 4. Clean up Spec to ensure K8s treats it as a fresh job
+        newJob.metadata.labels["controller-uid"] = nil
+        newJob.metadata.labels["job-name"] = nil
+        newJob.spec = obj.spec
         newJob.spec.selector = nil
         newJob.spec.template.metadata.labels["controller-uid"] = nil
         newJob.spec.template.metadata.labels["job-name"] = nil
-
         return {
           k8s = {
             version = "batch/v1",
