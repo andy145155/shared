@@ -19,6 +19,7 @@ data:
         action.lua: |
           local os = require("os")
           local result = {}
+
           local function deepCopy(obj)
             local lookup = {}
             local function _copy(o)
@@ -31,6 +32,7 @@ data:
             end
             return _copy(obj)
           end
+
           local function cleanPodSpec(podSpec)
             if not podSpec then return end
             if podSpec.securityContext and next(podSpec.securityContext) == nil then podSpec.securityContext = nil end
@@ -44,17 +46,22 @@ data:
             cleanContainers(podSpec.containers)
             cleanContainers(podSpec.initContainers)
           end
+
           if obj then
             local suffix = "-retry-" .. os.time()
             local newName = obj.metadata.name .. suffix
+
             local newJob = {
               apiVersion = "batch/v1",
               kind = "Job",
               metadata = {},
               spec = deepCopy(obj.spec or {})
             }
+
             newJob.metadata.name = newName
             newJob.metadata.namespace = obj.metadata.namespace
+            
+            -- Labels
             local labels = deepCopy(obj.metadata.labels or {})
             labels["controller-uid"] = nil
             labels["batch.kubernetes.io/controller-uid"] = nil
@@ -62,27 +69,38 @@ data:
             labels["batch.kubernetes.io/job-name"] = nil
             labels["argocd-action"] = "restarted-job"
             newJob.metadata.labels = labels
+
+            -- Annotations
             if obj.metadata.annotations then
               newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
               newJob.metadata.annotations["argocd.argoproj.io/hook"] = nil
               newJob.metadata.annotations["argocd.argoproj.io/hook-delete-policy"] = nil
               newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
+              
+              -- Unique Tracking ID (Allows visibility)
               if newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] then
                  local oldId = newJob.metadata.annotations["argocd.argoproj.io/tracking-id"]
                  newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = oldId .. suffix
               end
-              newJob.metadata.annotations["argocd.argoproj.io/sync-options"] = "Prune=false"
+              
+              -- REMOVED "Prune=false" so you can delete it via UI
             else
               newJob.metadata.annotations = {}
-              newJob.metadata.annotations["argocd.argoproj.io/sync-options"] = "Prune=false"
             end
+
+            -- Clean Spec
             newJob.spec.selector = nil
             newJob.spec.template.metadata.creationTimestamp = nil
+            
+            -- Auto-Cleanup: Delete 1 day (86400s) after completion
+            newJob.spec.ttlSecondsAfterFinished = 86400
+
             if newJob.spec.template then
                if not newJob.spec.template.metadata then newJob.spec.template.metadata = {} end
                newJob.spec.template.metadata.labels = deepCopy(newJob.metadata.labels)
                if newJob.spec.template.spec then cleanPodSpec(newJob.spec.template.spec) end
             end
+
             result[1] = { operation = "create", resource = newJob }
           end
           return result
