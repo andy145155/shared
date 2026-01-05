@@ -5,69 +5,65 @@ metadata:
   namespace: argocd
 data:
   resource.customizations.actions.batch_Job: |
-    # 1. Discovery: Check for the specific label
+    # 1. Discovery (Unchanged - keeps your label check)
     discovery.lua: |
       actions = {}
-      -- Safely check if labels exist, then check for the specific key/value
       if obj.metadata.labels ~= nil and obj.metadata.labels["argocd.custom-action/retryable"] == "true" then
         actions["restart"] = {}
       end
       return actions
 
-    # 2. Definitions: UI Configuration
+    # 2. Definitions (Unchanged)
     definitions:
       - name: restart
         title: Restart Job
         message: Creating a new Job from this spec...
         icon: replay
 
-    # 3. Action Logic: (Same as before)
+    # 3. Action Logic (Fixed & Robust)
     action.lua: |
       local os = require("os")
-
-      -- Deep copy helper
-      function deepCopy(object)
-          local lookup_table = {}
-          local function _copy(obj)
-              if type(obj) ~= "table" then
-                  return obj
-              elseif lookup_table[obj] then
-                  return lookup_table[obj]
+      
+      -- Simplified Deep Copy (Safe for K8s objects)
+      local function deepCopy(orig)
+          local orig_type = type(orig)
+          local copy
+          if orig_type == 'table' then
+              copy = {}
+              for orig_key, orig_value in next, orig, nil do
+                  copy[deepCopy(orig_key)] = deepCopy(orig_value)
               end
-              local new_table = {}
-              lookup_table[obj] = new_table
-              for key, value in pairs(obj) do
-                  new_table[_copy(key)] = _copy(value)
-              end
-              return setmetatable(new_table, getmetatable(obj))
+          else -- number, string, boolean, etc
+              copy = orig
           end
-          return _copy(object)
+          return copy
       end
 
+      -- Initialize new Job
       local newJob = {}
       newJob.apiVersion = "batch/v1"
       newJob.kind = "Job"
       newJob.metadata = {}
       
-      -- Generate unique name
+      -- Generate Name (Safe Length)
       local baseName = obj.metadata.name
-      if string.len(baseName) > 45 then
-        baseName = string.sub(baseName, 1, 45)
+      if string.len(baseName) > 40 then
+        baseName = string.sub(baseName, 1, 40)
       end
-      newJob.metadata.name = baseName .. "-rst-" .. os.date("%Y%m%d%H%M%S")
+      -- Use os.time() as a fallback for uniqueness
+      newJob.metadata.name = baseName .. "-rst-" .. os.time()
       newJob.metadata.namespace = obj.metadata.namespace
 
       -- Copy Labels
-      if obj.metadata.labels ~= nil then
+      if obj.metadata.labels then
         newJob.metadata.labels = deepCopy(obj.metadata.labels)
       else
         newJob.metadata.labels = {}
       end
-      -- Ensure the new job also has the retryable label (optional, keeps it restartable)
       newJob.metadata.labels["argocd-action"] = "restarted-job"
 
-      -- Handle Annotations (Strip ArgoCD hooks/tracking)
-      if obj.metadata.annotations ~= nil then
+      -- Handle Annotations (Strip Hooks/Tracking)
+      if obj.metadata.annotations then
         newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
         newJob.metadata.annotations["argocd.argoproj.io/hook"] = nil
         newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
@@ -75,10 +71,17 @@ data:
       end
 
       -- Copy Spec
-      newJob.spec = deepCopy(obj.spec)
-      newJob.spec.selector = nil -- Let k8s generate a new selector
-      newJob.spec.template.metadata.labels = newJob.metadata.labels
+      if obj.spec then
+        newJob.spec = deepCopy(obj.spec)
+        newJob.spec.selector = nil -- Reset selector
+        
+        -- Safe label assignment for the pod template
+        if newJob.spec.template and newJob.spec.template.metadata then
+             newJob.spec.template.metadata.labels = newJob.metadata.labels
+        end
+      end
 
+      -- Return Result
       local result = {}
       result[1] = {
         operation = "create",
