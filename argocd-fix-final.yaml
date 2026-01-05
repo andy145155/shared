@@ -1,25 +1,31 @@
-apiVersion: v1
-kind: ConfigMap
+# 1. Create a Role in the target namespace (external-dns)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
 metadata:
-  name: argocd-cm
-  namespace: argocd
-data:
-  resource.customizations.actions.batch_Job: "discovery.lua: \"actions = {}\\nif obj.metadata.labels\
-    \ and obj.metadata.labels[\\\"argocd.custom-action/retryable\\\"\\\n  ] == \\\"\
-    true\\\" then\\n  actions[\\\"retry\\\"] = {\\n    name = \\\"Retry Verification\\\
-    \"\\\n  ,\\n    title = \\\"Retry Verification\\\",\\n    disabled = false\\n\
-    \  }\\nend\\nreturn actions\"\ndefinitions:\n- name: retry\n  action.lua: \"local\
-    \ os = require(\\\"os\\\")\\nlocal newJob = {}\\nnewJob.apiVersion =\\\n    \\\
-    \ \\\"batch/v1\\\"\\nnewJob.kind = \\\"Job\\\"\\nnewJob.metadata = {}\\nnewJob.metadata.name\\\
-    \n    \\ = obj.metadata.name .. \\\"-retry-\\\" .. os.time()\\nnewJob.metadata.namespace\
-    \ =\\\n    \\ obj.metadata.namespace\\n\\n-- Deep Copy Labels manually to avoid\
-    \ reference issues\\n\\\n    newJob.metadata.labels = {}\\nif obj.metadata.labels\
-    \ then\\n  for k,v in pairs(obj.metadata.labels)\\\n    \\ do\\n    newJob.metadata.labels[k]\
-    \ = v\\n  end\\nend\\n\\n-- Clean up system labels\\n\\\n    newJob.metadata.labels[\\\
-    \"controller-uid\\\"] = nil\\nnewJob.metadata.labels[\\\"job-name\\\"\\\n    ]\
-    \ = nil\\n\\n-- Copy Spec\\nnewJob.spec = obj.spec\\nnewJob.spec.selector = nil\\\
-    n\\\n    newJob.spec.template.metadata.labels[\\\"controller-uid\\\"] = nil\\\
-    nnewJob.spec.template.metadata.labels[\\\"\\\n    job-name\\\"] = nil\\n\\nreturn\
-    \ {\\n  k8s = {\\n    version = \\\"batch/v1\\\",\\n    kind\\\n    \\ = \\\"\
-    Job\\\",\\n    operation = \\\"create\\\",\\n    resource = newJob\\n  }\\n}\"\
-    \n"
+  namespace: external-dns   # <--- The namespace where your Job lives
+  name: argocd-job-restarter
+rules:
+  # Allow creating/managing Jobs (for the restart action)
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Allow creating events (to fix the specific error in your logs)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+---
+# 2. Bind that Role to the argocd-server ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: external-dns
+  name: argocd-job-restarter-binding
+subjects:
+  - kind: ServiceAccount
+    name: argocd-server     # The account executing the Lua script
+    namespace: argocd       # Where ArgoCD is installed
+roleRef:
+  kind: Role
+  name: argocd-job-restarter
+  apiGroup: rbac.authorization.k8s.io
