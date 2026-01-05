@@ -22,7 +22,11 @@ data:
           
           if obj then
             local baseName = obj.metadata.name or "job"
-            if string.len(baseName)>40 then baseName=string.sub(baseName,1,40) end
+            -- FIX: Use # operator instead of string.len to avoid nil error
+            if #baseName > 40 then 
+              -- FIX: Use method syntax (:sub) instead of string.sub
+              baseName = baseName:sub(1, 40) 
+            end
             
             local newJob={apiVersion="batch/v1", kind="Job", metadata={}, spec=deepCopy(obj.spec or {})}
             newJob.metadata.name=baseName.."-rst-"..os.time()
