@@ -17,36 +17,61 @@ data:
         message: Restarting Job...
         icon: replay
         action.lua: |
-          local os=require("os"); local result={}; 
-          local function deepCopy(o) if type(o)~="table" then return o end local c={} for k,v in pairs(o) do c[deepCopy(k)]=deepCopy(v) end return c end
-          
+          local os = require("os")
+          local result = {}
+
+          -- 1. Robust Deep Copy (Handles edge cases safely)
+          local function deepCopy(obj)
+            local lookup = {}
+            local function _copy(o)
+              if type(o) ~= "table" then return o end
+              if lookup[o] then return lookup[o] end
+              local new = {}
+              lookup[o] = new
+              for k, v in pairs(o) do new[_copy(k)] = _copy(v) end
+              return new
+            end
+            return _copy(obj)
+          end
+
           if obj then
+            -- 2. Safe Name (Uses # operator to avoid string library nil errors)
             local baseName = obj.metadata.name or "job"
-            -- FIX: Use # operator instead of string.len to avoid nil error
-            if #baseName > 40 then 
-              -- FIX: Use method syntax (:sub) instead of string.sub
-              baseName = baseName:sub(1, 40) 
+            if #baseName > 40 then baseName = baseName:sub(1, 40) end
+            
+            -- 3. Construct New Job Manually (Prevents circular JSON errors)
+            local newJob = {
+              apiVersion = "batch/v1",
+              kind = "Job",
+              metadata = {},
+              spec = deepCopy(obj.spec or {})
+            }
+            
+            newJob.metadata.name = baseName .. "-rst-" .. os.time()
+            newJob.metadata.namespace = obj.metadata.namespace
+            
+            -- Copy Labels
+            newJob.metadata.labels = deepCopy(obj.metadata.labels or {})
+            newJob.metadata.labels["argocd-action"] = "restarted-job"
+            
+            -- Clean Annotations
+            if obj.metadata.annotations then
+              newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
+              newJob.metadata.annotations["argocd.argoproj.io/hook"] = nil
+              newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = nil
+              newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
             end
             
-            local newJob={apiVersion="batch/v1", kind="Job", metadata={}, spec=deepCopy(obj.spec or {})}
-            newJob.metadata.name=baseName.."-rst-"..os.time()
-            newJob.metadata.namespace=obj.metadata.namespace
-            newJob.metadata.labels=deepCopy(obj.metadata.labels or {})
-            newJob.metadata.labels["argocd-action"]="restarted-job"
-            
-            if obj.metadata.annotations then 
-              newJob.metadata.annotations=deepCopy(obj.metadata.annotations)
-              newJob.metadata.annotations["argocd.argoproj.io/hook"]=nil
-              newJob.metadata.annotations["argocd.argoproj.io/tracking-id"]=nil
-              newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"]=nil 
+            -- Clean Spec
+            newJob.spec.selector = nil
+            if newJob.spec.template then
+               if not newJob.spec.template.metadata then newJob.spec.template.metadata = {} end
+               -- FIX: Deep Copy here instead of assigning (=). 
+               -- This prevents "recursively nested tables" JSON errors.
+               newJob.spec.template.metadata.labels = deepCopy(newJob.metadata.labels)
             end
             
-            newJob.spec.selector=nil
-            if newJob.spec.template and newJob.spec.template.metadata then 
-              newJob.spec.template.metadata.labels=newJob.metadata.labels 
-            end
-            
-            result[1]={operation="create", resource=newJob}
+            result[1] = { operation = "create", resource = newJob }
           end
           return result
 EOF
