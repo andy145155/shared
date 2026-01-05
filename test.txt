@@ -1,19 +1,67 @@
+Based on the screenshots provided, you are introducing two significant improvements: automated verification for the `external-dns` application in non-prod environments, and a quality-of-life feature in ArgoCD to manually restart failed Jobs.
 
-**Objective**
-Develop the automated verification logic for the baseline app based on the approved Design Doc. The goal is to move beyond replace the manual verification and implement a an automated test that runs after every deployment.
+Here is a drafted PR description you can use.
 
-**Scope of Work**
+---
 
-1. **Script Implementation:** Write the verification code (Python/Bash/Go) that executes the "Test Scenario" defined in the Design Doc.
-2. **Safety & Cleanup:** Implement the "Pre-flight Cleanup" and "Graceful Shutdown" logic to ensure the script is self-cleaning and does not leave test data in the cluster.
-3. **Containerization:** Build and publish the docker image for the verification script.
-4. **Integration:** Configure the Kubernetes Job manifest to run as an **ArgoCD PostSync/PreSync Hook** if possible.
+**PR Title:** feat: Add external-dns verification job and ArgoCD Job restart action
 
-**Acceptance Criteria**
+### 📝 Summary
 
-* [ ] **Logic Implemented:** The script successfully performs the *functional* create/trigger/assert workflow defined in the Design Doc.
-* [ ] **Safety Mechanisms:** The script handles failures gracefully and cleans up test resources (preventing "zombie" resources).
-* [ ] **ArgoCD Integration:** The Job triggers automatically after a Sync and accurately reports status back to ArgoCD (Green = Functionally Working, Red = Functional Failure).
-* [ ] **Timeout Handling:** The Job has a configured `activeDeadlineSeconds` to prevent hanging indefinitely.
-* [ ] **README Finalized:** The Design Doc (README.md) created in the spike is updated with final usage instructions and configuration details.
-* [ ] **Code Review:** Code passed PR review.
+This PR introduces a PostSync verification workflow for `external-dns` in `dev` and `stg` environments and adds a global custom action to ArgoCD to allow manual restarting of Kubernetes Jobs via the UI.
+
+### 🛠️ Changes
+
+#### 1. ArgoCD Custom Action (Lua Script)
+
+* **File:** `bootstrap/shared/patches/argocd-cm.yaml` (Inferred context)
+* **Feature:** Added a `restart` action for `batch/Job` resources in ArgoCD.
+* **Logic:**
+* The action is available only if the Job has the label `argocd.custom-action/retryable: "true"`.
+* Because Jobs are immutable, the Lua script performs a "Deep Copy" of the failed job, cleanses specific fields (selectors, `controller-uid`, timestamps, and `resourceVersion`), and creates a **new** Job with a unique suffix (e.g., `-retry-<timestamp>`).
+* This allows engineers to retry failed PostSync hooks or CronJobs directly from the ArgoCD UI without triggering a full Application Sync or manually deleting the stuck Job.
+
+
+
+#### 2. External DNS Verification (`dev`/`stg` only)
+
+* **File:** `apps/baseline/templates/external-dns.yaml`
+* **Feature:** Implemented a verification Job that runs after the application sync (`PostSync` hook).
+* **Resources Added:**
+* **ServiceAccount:** `verification-{{ $app.name }}`
+* **ClusterRole & Binding:** Grants `get` and `list` permissions on `pods` and `services` to the verification job.
+* **Job:** A container running the image `verification-{{ $app.name }}:0.0.1`.
+
+
+* **Configuration:**
+* Wrapped in a conditional block: `{{- if has $.Values.mox.cluster.env (list "dev" "stg") }}`.
+* Annotated with `argocd.custom-action/retryable: "true"` to utilize the new restart feature mentioned above.
+
+
+
+### 🎯 Objective
+
+* Ensure `external-dns` deployments are automatically verified in lower environments.
+* Reduce operational toil by allowing one-click retries for transient failures in verification jobs or other hook-based tasks.
+
+### 🧪 Testing
+
+* Verified that the `verification` resources are only generated when `env` is `dev` or `stg`.
+* Verified that the "Restart" button appears in the ArgoCD UI for jobs with the `retryable` label.
+* Confirmed that clicking "Restart" successfully creates a new Job pod and retains the necessary spec configurations.
+
+---
+
+### 💡 Optional Note for you (Andy):
+
+In Image 1, line 166 (inside the verification job env vars), you have:
+
+```yaml
+- name: TEST_NAMESPACE
+  value: verification-{{ $app.name }}
+
+```
+
+Usually, `TEST_NAMESPACE` implies the namespace where the tests *run* or the namespace being *tested*. Currently, it looks like you are setting it to the **Job Name** (`verification-...`) rather than the Namespace (`{{ $app.namespace.name }}`).
+
+If this is a typo, you might want to fix it before pushing!
