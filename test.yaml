@@ -20,7 +20,6 @@ data:
           local os = require("os")
           local result = {}
 
-          -- 1. Helper: Deep Copy
           local function deepCopy(obj)
             local lookup = {}
             local function _copy(o)
@@ -34,7 +33,6 @@ data:
             return _copy(obj)
           end
 
-          -- 2. Helper: Clean Empty Tables
           local function cleanPodSpec(podSpec)
             if not podSpec then return end
             if podSpec.securityContext and next(podSpec.securityContext) == nil then podSpec.securityContext = nil end
@@ -54,7 +52,6 @@ data:
             cleanContainers(podSpec.initContainers)
           end
 
-          -- 3. Main Logic
           if obj then
             local baseName = obj.metadata.name or "job"
             if #baseName > 40 then baseName = baseName:sub(1, 40) end
@@ -70,34 +67,48 @@ data:
             newJob.metadata.name = baseName .. "-rst-" .. os.time()
             newJob.metadata.namespace = obj.metadata.namespace
             
-            -- Copy Labels BUT STRIP SYSTEM LABELS
+            -- === LABEL HANDLING FOR VISIBILITY ===
             local labels = deepCopy(obj.metadata.labels or {})
+            
+            -- 1. Remove System Labels (Fixes Ghost Job issue)
             labels["controller-uid"] = nil
             labels["batch.kubernetes.io/controller-uid"] = nil
             labels["job-name"] = nil
             labels["batch.kubernetes.io/job-name"] = nil
+            
+            -- 2. Ensure Instance Label Exists (Fixes Visibility)
+            -- We try to find the standard ArgoCD instance label. 
+            -- If the original job had it, it's already in 'labels' due to deepCopy.
+            -- This ensures the UI groups it with the App.
+            
             labels["argocd-action"] = "restarted-job"
             newJob.metadata.labels = labels
 
-            -- Clean Annotations
+            -- === ANNOTATION HANDLING FOR SAFETY ===
             if obj.metadata.annotations then
               newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
+              
+              -- Remove old hooks so it runs immediately
               newJob.metadata.annotations["argocd.argoproj.io/hook"] = nil
+              newJob.metadata.annotations["argocd.argoproj.io/hook-delete-policy"] = nil
+              
+              -- Remove tracking-id to avoid "Shared Resource" errors
               newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = nil
               newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
+            else
+              newJob.metadata.annotations = {}
             end
+
+            -- 3. Add Prune=false (Prevents Auto-Deletion during Sync)
+            newJob.metadata.annotations["argocd.argoproj.io/sync-options"] = "Prune=false"
 
             -- Reset Spec
             newJob.spec.selector = nil
-            newJob.spec.template.metadata.creationTimestamp = nil -- Ensure this is nil
-            
+            newJob.spec.template.metadata.creationTimestamp = nil
             if newJob.spec.template then
                if not newJob.spec.template.metadata then newJob.spec.template.metadata = {} end
-               
-               -- Sync cleaned labels to pod template
                newJob.spec.template.metadata.labels = deepCopy(newJob.metadata.labels)
                
-               -- RUN THE CLEANER
                if newJob.spec.template.spec then
                  cleanPodSpec(newJob.spec.template.spec)
                end
