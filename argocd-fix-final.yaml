@@ -1,21 +1,17 @@
-# 1. Create a Role in the target namespace (external-dns)
+# argocd-job-restart-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  namespace: external-dns   # <--- The namespace where your Job lives
+  namespace: external-dns  # <--- The namespace showing the error in your logs
   name: argocd-job-restarter
 rules:
-  # Allow creating/managing Jobs (for the restart action)
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
-  # Allow creating events (to fix the specific error in your logs)
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
-
 ---
-# 2. Bind that Role to the argocd-server ServiceAccount
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -23,8 +19,8 @@ metadata:
   name: argocd-job-restarter-binding
 subjects:
   - kind: ServiceAccount
-    name: argocd-server     # The account executing the Lua script
-    namespace: argocd       # Where ArgoCD is installed
+    name: argocd-server      # The SA running the Lua script
+    namespace: argocd        # The namespace where ArgoCD is installed
 roleRef:
   kind: Role
   name: argocd-job-restarter
