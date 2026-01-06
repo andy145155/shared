@@ -1,29 +1,47 @@
+# 1. A dummy application to ensure the LoadBalancer becomes "Healthy" quickly
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-dns-test-fixture
+  namespace: verification-external-dns # Uses your new isolated namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: external-dns-test
+  template:
+    metadata:
+      labels:
+        app: external-dns-test
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine # Extremely lightweight
+          ports:
+            - containerPort: 80
+
+---
+# 2. The Service that triggers the DNS creation
 apiVersion: v1
 kind: Service
 metadata:
   name: external-dns-test-service
-  namespace: kong-template-service
-  labels:
-    app.kubernetes.io/instance: template-service
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: kong
-    app.kubernetes.io/version: "3.4"
-    enable-metrics: "true"
-    helm.sh/chart: kong-2.47.0
+  namespace: verification-external-dns
   annotations:
-    # The script will read this value to know what to verify in Route53
+    # --- THE ONLY THING THAT MATTERS FOR THE TEST ---
     external-dns.alpha.kubernetes.io/hostname: external-dns-test.api.kong.dmz.ap-east-1.dev-mox.com
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    # -----------------------------------------------
+    
+    # Optional: Keep these generic if you specifically need an NLB.
+    # If a Classic LB (CLB) is fine for testing DNS, you can remove them entirely!
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
 spec:
   type: LoadBalancer
-  ports:
-    - name: kong-proxy-tls-test
-      port: 443
-      protocol: TCP
-      targetPort: 8443
   selector:
-    app.kubernetes.io/component: template-service
-    app.kubernetes.io/instance: template-service
-    app.kubernetes.io/name: kong
+    app: external-dns-test # Points to our Nginx pod above
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80

@@ -4,7 +4,236 @@ import logging
 import yaml
 import boto3
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Any, List
+from typing import Dict, Tuple, Optional, Any, Lisimport os
+import time
+import logging
+import yaml
+import boto3
+from pathlib import Path
+from typing import Dict, Tuple, Any, List, Optional
+
+from kubernetes import client, config
+from botocore.exceptions import ClientError, BotoCoreError
+
+# --- Configuration ---
+AWS_REGION = os.getenv("AWS_REGION", "ap-east-1")
+HOSTED_ZONE_NAME = os.getenv("HOSTED_ZONE_NAME", "dmz.ap-east-1.dev-mox.com.")
+MANIFEST_PATH = os.getenv("MANIFEST_PATH", "service-test.yaml")
+POLL_TIMEOUT_SECONDS = int(os.getenv("POLL_TIMEOUT_SECONDS", 300))
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", 10))
+
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
+
+
+def load_manifests(file_path: str) -> Tuple[List[Dict[str, Any]], str, Optional[str]]:
+    """
+    Parses a multi-document YAML file.
+    
+    Returns:
+        - List of all resource dicts (Deployment, Service, etc.)
+        - The target Namespace (assumes all resources share the same NS)
+        - The target DNS Hostname (extracted from the Service annotation)
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Manifest file not found: {file_path}")
+
+    with path.open("r") as f:
+        try:
+            # safe_load_all is required for multi-document YAML (separated by ---)
+            docs = list(yaml.safe_load_all(f))
+        except yaml.YAMLError as e:
+            raise ValueError(f"Failed to parse YAML: {e}")
+
+    if not docs:
+        raise ValueError("YAML file is empty.")
+
+    resources = [doc for doc in docs if doc] # Filter empty docs
+    
+    # Extract common namespace and finding the DNS annotation
+    namespace = "default"
+    dns_hostname = None
+
+    for res in resources:
+        metadata = res.get("metadata", {})
+        
+        # Capture namespace (assuming consistency across file)
+        if "namespace" in metadata:
+            namespace = metadata["namespace"]
+            
+        # Look for the DNS annotation in Services
+        if res.get("kind") == "Service":
+            annotations = metadata.get("annotations", {})
+            found_dns = annotations.get("external-dns.alpha.kubernetes.io/hostname")
+            if found_dns:
+                dns_hostname = found_dns
+
+    if not dns_hostname:
+        raise ValueError("Could not find 'external-dns.alpha.kubernetes.io/hostname' annotation in any Service.")
+
+    return resources, namespace, dns_hostname
+
+
+def initialize_k8s_clients() -> Tuple[client.CoreV1Api, client.AppsV1Api]:
+    """Initializes K8s clients for both Core (Services) and Apps (Deployments)."""
+    try:
+        config.load_kube_config()
+        logger.info("Loaded local kubeconfig.")
+    except config.ConfigException:
+        logger.info("Loading in-cluster config.")
+        config.load_incluster_config()
+    
+    return client.CoreV1Api(), client.AppsV1Api()
+
+
+def apply_resource(core_api: client.CoreV1Api, apps_api: client.AppsV1Api, resource: Dict[str, Any], namespace: str):
+    """Applies a Kubernetes resource based on its Kind."""
+    kind = resource.get("kind")
+    metadata = resource.get("metadata", {})
+    name = metadata.get("name")
+
+    logger.info(f"Applying {kind}: {name}...")
+
+    try:
+        if kind == "Service":
+            core_api.create_namespaced_service(namespace=namespace, body=resource)
+        elif kind == "Deployment":
+            apps_api.create_namespaced_deployment(namespace=namespace, body=resource)
+        else:
+            logger.warning(f"Unsupported Kind '{kind}'. Skipping application.")
+            return
+
+        logger.info(f"✅ Created {kind}/{name}")
+
+    except client.exceptions.ApiException as e:
+        if e.status == 409:
+            logger.warning(f"⚠️  {kind}/{name} already exists. Proceeding.")
+        else:
+            raise
+
+
+def cleanup_resources(
+    core_api: client.CoreV1Api, 
+    apps_api: client.AppsV1Api, 
+    resources: List[Dict[str, Any]], 
+    namespace: str
+):
+    """Deletes all resources defined in the YAML."""
+    logger.info("--- Starting K8s Resource Cleanup ---")
+    
+    # Process in reverse order typically (Service first, then Deployment) 
+    # but strictly speaking K8s handles dependencies well.
+    for res in resources:
+        kind = res.get("kind")
+        name = res.get("metadata", {}).get("name")
+        
+        try:
+            if kind == "Service":
+                core_api.delete_namespaced_service(name=name, namespace=namespace)
+                logger.info(f"Deleted Service: {name}")
+            elif kind == "Deployment":
+                apps_api.delete_namespaced_deployment(name=name, namespace=namespace)
+                logger.info(f"Deleted Deployment: {name}")
+        except client.exceptions.ApiException as e:
+            if e.status == 404:
+                logger.info(f"{kind}/{name} already gone.")
+            else:
+                logger.error(f"Failed to delete {kind}/{name}: {e}")
+
+
+def wait_for_dns_propagation(route53_client: Any, zone_id: str, record_name: str) -> bool:
+    """Polls Route53 for the record."""
+    target_dns = record_name if record_name.endswith(".") else f"{record_name}."
+    logger.info(f"Polling Route53 for: {target_dns} (Timeout: {POLL_TIMEOUT_SECONDS}s)")
+    
+    start_time = time.time()
+    while time.time() - start_time < POLL_TIMEOUT_SECONDS:
+        try:
+            response = route53_client.list_resource_record_sets(
+                HostedZoneId=zone_id, StartRecordName=target_dns, MaxItems="1"
+            )
+            records = response.get("ResourceRecordSets", [])
+            if records and records[0]["Name"] == target_dns:
+                logger.info(f"✅ DNS Record found: {target_dns}")
+                return True
+            
+            time.sleep(POLL_INTERVAL_SECONDS)
+        except (ClientError, BotoCoreError) as e:
+            logger.warning(f"Polling error: {e}")
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+    logger.error("❌ Timeout waiting for DNS.")
+    return False
+
+def cleanup_route53(route53_client: Any, zone_id: str, dns_name: str):
+    """Force cleans the Route53 record."""
+    target_dns = dns_name if dns_name.endswith(".") else f"{dns_name}."
+    try:
+        response = route53_client.list_resource_record_sets(
+            HostedZoneId=zone_id, StartRecordName=target_dns, MaxItems="1"
+        )
+        changes = []
+        for r in response.get("ResourceRecordSets", []):
+            if r["Name"] == target_dns and r["Type"] in ["A", "TXT"]:
+                changes.append({"Action": "DELETE", "ResourceRecordSet": r})
+        
+        if changes:
+            logger.info(f"Cleaning {len(changes)} Route53 records...")
+            route53_client.change_resource_record_sets(
+                HostedZoneId=zone_id, ChangeBatch={"Changes": changes}
+            )
+    except Exception as e:
+        logger.error(f"Route53 Cleanup failed: {e}")
+
+
+def main():
+    try:
+        # 1. Load Config
+        resources, namespace, dns_name = load_manifests(MANIFEST_PATH)
+        logger.info(f"Loaded {len(resources)} resources for namespace '{namespace}' targeting DNS '{dns_name}'")
+
+        # 2. Init Clients
+        core_api, apps_api = initialize_k8s_clients()
+        r53 = boto3.client("route53", region_name=AWS_REGION)
+
+        # 3. Get Zone ID
+        # (Simplified for brevity: assumes simple lookup logic from previous turn)
+        zones = r53.list_hosted_zones_by_name(DNSName=HOSTED_ZONE_NAME)
+        zone_id = next((z["Id"].split("/")[-1] for z in zones["HostedZones"] 
+                        if z["Name"] in [HOSTED_ZONE_NAME, HOSTED_ZONE_NAME + "."]), None)
+        
+        if not zone_id:
+            logger.critical(f"Hosted Zone {HOSTED_ZONE_NAME} not found.")
+            return
+
+        try:
+            # 4. Deploy (Deployment + Service)
+            for res in resources:
+                apply_resource(core_api, apps_api, res, namespace)
+
+            # 5. Verify
+            if wait_for_dns_propagation(r53, zone_id, dns_name):
+                logger.info("🎉 VERIFICATION SUCCESSFUL")
+            else:
+                raise RuntimeError("Verification Failed: DNS not found.")
+
+        finally:
+            # 6. Cleanup (K8s + Route53)
+            cleanup_resources(core_api, apps_api, resources, namespace)
+            cleanup_route53(r53, zone_id, dns_name)
+
+    except Exception as e:
+        logger.critical(f"Script failed: {e}")
+        exit(1)
+
+if __name__ == "__main__":
+    main()t
 
 from kubernetes import client, config
 from botocore.exceptions import ClientError, BotoCoreError
