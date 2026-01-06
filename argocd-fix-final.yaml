@@ -1,27 +1,29 @@
-# argocd-job-restart-rbac.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+apiVersion: v1
+kind: Service
 metadata:
-  namespace: external-dns  # <--- The namespace showing the error in your logs
-  name: argocd-job-restarter
-rules:
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["create", "get", "list", "watch", "delete"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  namespace: external-dns
-  name: argocd-job-restarter-binding
-subjects:
-  - kind: ServiceAccount
-    name: argocd-server      # The SA running the Lua script
-    namespace: argocd        # The namespace where ArgoCD is installed
-roleRef:
-  kind: Role
-  name: argocd-job-restarter
-  apiGroup: rbac.authorization.k8s.io
+  name: external-dns-test-service
+  namespace: kong-template-service
+  labels:
+    app.kubernetes.io/instance: template-service
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/version: "3.4"
+    enable-metrics: "true"
+    helm.sh/chart: kong-2.47.0
+  annotations:
+    # The script will read this value to know what to verify in Route53
+    external-dns.alpha.kubernetes.io/hostname: external-dns-test.api.kong.dmz.ap-east-1.dev-mox.com
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+spec:
+  type: LoadBalancer
+  ports:
+    - name: kong-proxy-tls-test
+      port: 443
+      protocol: TCP
+      targetPort: 8443
+  selector:
+    app.kubernetes.io/component: template-service
+    app.kubernetes.io/instance: template-service
+    app.kubernetes.io/name: kong
