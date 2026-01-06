@@ -1,67 +1,30 @@
-Based on the screenshots provided, you are introducing two significant improvements: automated verification for the `external-dns` application in non-prod environments, and a quality-of-life feature in ArgoCD to manually restart failed Jobs.
-
-Here is a drafted PR description you can use.
-
----
-
-**PR Title:** feat: Add external-dns verification job and ArgoCD Job restart action
-
-### 📝 Summary
-
-This PR introduces a PostSync verification workflow for `external-dns` in `dev` and `stg` environments and adds a global custom action to ArgoCD to allow manual restarting of Kubernetes Jobs via the UI.
-
-### 🛠️ Changes
-
-#### 1. ArgoCD Custom Action (Lua Script)
-
-* **File:** `bootstrap/shared/patches/argocd-cm.yaml` (Inferred context)
-* **Feature:** Added a `restart` action for `batch/Job` resources in ArgoCD.
-* **Logic:**
-* The action is available only if the Job has the label `argocd.custom-action/retryable: "true"`.
-* Because Jobs are immutable, the Lua script performs a "Deep Copy" of the failed job, cleanses specific fields (selectors, `controller-uid`, timestamps, and `resourceVersion`), and creates a **new** Job with a unique suffix (e.g., `-retry-<timestamp>`).
-* This allows engineers to retry failed PostSync hooks or CronJobs directly from the ArgoCD UI without triggering a full Application Sync or manually deleting the stuck Job.
-
-
-
-#### 2. External DNS Verification (`dev`/`stg` only)
-
-* **File:** `apps/baseline/templates/external-dns.yaml`
-* **Feature:** Implemented a verification Job that runs after the application sync (`PostSync` hook).
-* **Resources Added:**
-* **ServiceAccount:** `verification-{{ $app.name }}`
-* **ClusterRole & Binding:** Grants `get` and `list` permissions on `pods` and `services` to the verification job.
-* **Job:** A container running the image `verification-{{ $app.name }}:0.0.1`.
-
-
-* **Configuration:**
-* Wrapped in a conditional block: `{{- if has $.Values.mox.cluster.env (list "dev" "stg") }}`.
-* Annotated with `argocd.custom-action/retryable: "true"` to utilize the new restart feature mentioned above.
-
-
-
-### 🎯 Objective
-
-* Ensure `external-dns` deployments are automatically verified in lower environments.
-* Reduce operational toil by allowing one-click retries for transient failures in verification jobs or other hook-based tasks.
-
-### 🧪 Testing
-
-* Verified that the `verification` resources are only generated when `env` is `dev` or `stg`.
-* Verified that the "Restart" button appears in the ArgoCD UI for jobs with the `retryable` label.
-* Confirmed that clicking "Restart" successfully creates a new Job pod and retains the necessary spec configurations.
-
----
-
-### 💡 Optional Note for you (Andy):
-
-In Image 1, line 166 (inside the verification job env vars), you have:
-
-```yaml
-- name: TEST_NAMESPACE
-  value: verification-{{ $app.name }}
-
-```
-
-Usually, `TEST_NAMESPACE` implies the namespace where the tests *run* or the namespace being *tested*. Currently, it looks like you are setting it to the **Job Name** (`verification-...`) rather than the Namespace (`{{ $app.namespace.name }}`).
-
-If this is a typo, you might want to fix it before pushing!
+Task 1: Refactor Istio Verification Scripts & Containerize
+Goal: Break the current monolithic script into isolated, portable scripts and package them into Docker images. No ArgoCD changes happen here.
+Description:
+Currently, our verification runs as a "Monolithic Verification" script (verification-istio job) in the af-toolkit namespace. We need to modularize this logic so it can be run independently at different stages.
+This task involves extracting the specific logic for Control Plane, Ingress, and Data Plane verification into standalone scripts and containerizing them.
+Scope of Work:
+ * Extract Control Plane Logic: Create verify_controlplane.py (checks istiod deployment and runs istioctl analyze).
+ * Extract Ingress Logic: Create check_ingress_gateway.py (verifies external connectivity).
+ * Extract Data Plane Logic: Create check_mtls.py and check_retry_after.py.
+ * Containerization: Create distinct Docker images (or a shared image with different entry points) containing these scripts and the necessary binaries (e.g., istioctl).
+Acceptance Criteria:
+ * Script Separation: The monolithic verification-istio logic is successfully split into the individual python scripts listed above.
+ * Local Execution: Each script can be run independently against a cluster and returns the correct pass/fail exit codes.
+ * Docker Images: A Docker image is built and pushed to the registry containing the new modular scripts and istioctl.
+ * No Dependencies: The scripts do not rely on the legacy "all-in-one" job structure.
+Task 2: Integrate Verification Hooks into ArgoCD
+Goal: Update the ArgoCD Application manifests to trigger the containerized scripts (from Task 1) at the correct Sync Lifecycle stages.
+Description:
+Now that the verification logic is modularized, we need to integrate these checks into the ArgoCD pipeline to gate the upgrade process. This replaces the manual "verify at the end" flow with automated gating.
+Scope of Work:
+ * Stage A (Pre-Flight): Configure a PreSync hook on the istiod Application to run istioctl x precheck.
+ * Stage B (Control Plane): Configure a PostSync hook on the istiod Application to run the verify_controlplane.py container.
+ * Stage C (Ingress): Configure a PostSync hook on the istio-ingress Application to run the check_ingress_gateway.py container.
+ * Stage D (Data Plane): Configure a PostSync hook on the sequential-restart Application to run the check_mtls.py container.
+Acceptance Criteria:
+ * Gating Works: If the PreSync (Precheck) fails, the sync aborts immediately (nothing is applied).
+ * Control Plane Safety: If verify_controlplane.py fails, the pipeline stops before touching Ingress or Workloads.
+ * Ingress Verification: check_ingress_gateway.py runs automatically after the Ingress component syncs.
+ * Data Plane Verification: mTLS and proxy checks run automatically only after the workload restart job completes.
+Would you like me to format these as a CSV or a specific format for you to import directly into Jira?
