@@ -33,10 +33,11 @@ logger = logging.getLogger(__name__)
 
 # --- Config Class ---
 class VerificationConfig:
-    def __init__(self, mode: str, sources: Set[str]):
-        self.mode = mode        # 'sync' or 'upsert-only'
-        self.sources = sources  # e.g., {'service', 'istio-gateway'}
-
+    def __init__(self, mode: str, sources: Set[str], private_zone: bool):
+        self.mode = mode          # 'sync' or 'upsert-only'
+        self.sources = sources    # {'service', 'istio-gateway'}
+        self.private_zone = private_zone
+        
 # --- K8s Initialization ---
 def initialize_k8s_clients():
     try:
@@ -52,37 +53,60 @@ def detect_external_dns_config(core_api, namespace, label_selector) -> Verificat
     
     mode = "sync"
     sources = set()
+    is_private = False # Default to Public if flag is missing
 
     try:
         pods = core_api.list_namespaced_pod(namespace, label_selector=label_selector)
         if not pods.items:
-            logger.warning("   - No external-dns pods found. Defaulting to source=service, mode=sync.")
-            return VerificationConfig("sync", {"service"})
+            logger.warning("   - No pods found. Using defaults.")
+            return VerificationConfig("sync", {"service"}, False)
         
         pod = pods.items[0]
-        # Find external-dns container (or first container)
         container = next((c for c in pod.spec.containers if c.name == "external-dns"), pod.spec.containers[0])
         
         args = container.args or []
         for arg in args:
+            # Check Mode
             if "--policy=upsert-only" in arg:
                 mode = "upsert-only"
+            
+            # Check Sources
             if "--source=" in arg:
-                source_val = arg.split("=", 1)[1]
-                sources.add(source_val)
+                sources.add(arg.split("=", 1)[1])
+            
+            # Check Zone Type (The new logic)
+            if "--aws-zone-type=private" in arg:
+                logger.info("   - Detected Zone Type: PRIVATE")
+                is_private = True
+            elif "--aws-zone-type=public" in arg:
+                logger.info("   - Detected Zone Type: PUBLIC")
+                is_private = False
 
-        logger.info(f"   - Detected Mode: {mode.upper()}")
-        logger.info(f"   - Detected Sources: {sources}")
-        
         if not sources:
-            logger.warning("   - No explicit source args found. Assuming default 'service'.")
             sources.add("service")
 
-        return VerificationConfig(mode, sources)
+        return VerificationConfig(mode, sources, is_private)
 
     except Exception as e:
-        logger.error(f"   - Detection failed: {e}. using defaults.")
-        return VerificationConfig("sync", {"service"})
+        logger.error(f"   - Detection failed: {e}. Using defaults.")
+        return VerificationConfig("sync", {"service"}, False)
+
+def get_hosted_zone_id(route53_client, hosted_zone_name, private_zone=False):
+    target_name = hosted_zone_name if hosted_zone_name.endswith(".") else f"{hosted_zone_name}."
+    
+    try:
+        zones = route53_client.list_hosted_zones_by_name(DNSName=target_name)
+        for z in zones.get("HostedZones", []):
+            if z["Name"] == target_name:
+                # Strict check: Is this the Public/Private zone we specifically need?
+                if z["Config"]["PrivateZone"] == private_zone:
+                    return z["Id"].split("/")[-1]
+    except (ClientError, BotoCoreError):
+        logger.error("Error calling route53 client api")
+        raise
+
+    type_str = "Private" if private_zone else "Public"
+    raise ValueError(f"{type_str} Zone '{hosted_zone_name}' not found.")
 
 # --- 2. Load Correct Template ---
 def load_manifests(config: VerificationConfig) -> Tuple[List[Dict], str]:
