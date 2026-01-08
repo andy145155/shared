@@ -1,42 +1,21 @@
-# 1. Dummy Application
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: external-dns-test-fixture
-  namespace: ${TEST_NAMESPACE} 
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: external-dns-test
-  template:
-    metadata:
-      labels:
-        app: external-dns-test
-    spec:
-      containers:
-        - name: nginx
-          image: nginx:alpine
-          ports:
-            - containerPort: 80
+-- 1. Initialize annotations (either deep copy or empty table)
+if obj.metadata.annotations then
+    newJob.metadata.annotations = deepCopy(obj.metadata.annotations)
+    
+    -- 2. Remove unwanted keys (Cleanup)
+    newJob.metadata.annotations["argocd.argoproj.io/hook"] = nil
+    newJob.metadata.annotations["argocd.argoproj.io/hook-delete-policy"] = nil
+    newJob.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = nil
 
----
-# 2. Test Service
-apiVersion: v1
-kind: Service
-metadata:
-  name: external-dns-test-service
-  namespace: ${TEST_NAMESPACE} 
-  annotations:
-    external-dns.alpha.kubernetes.io/hostname: ${TEST_HOSTNAME}
-    service.beta.kubernetes.io/aws-load-balancer-type: external
-    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
-spec:
-  type: LoadBalancer
-  selector:
-    app: external-dns-test
-  ports:
-    - protocol: TCP
-      port: 80
-      targetPort: 80
+    -- 3. Handle Tracking ID logic specifically
+    if newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] then
+        local oldId = newJob.metadata.annotations["argocd.argoproj.io/tracking-id"]
+        newJob.metadata.annotations["argocd.argoproj.io/tracking-id"] = oldId .. suffix
+    end
+else
+    newJob.metadata.annotations = {}
+end
+
+-- 4. Apply common options (Always applies to newJob)
+newJob.metadata.annotations["argocd.argoproj.io/compare-options"] = "IgnoreExtraneous"
+newJob.metadata.annotations["argocd.argoproj.io/sync-options"] = "Prune=false"
