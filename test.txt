@@ -1,44 +1,70 @@
-Based on the diffs shown in the images, here is a structured Pull Request description.
-
-The changes focus on consolidating Service Accounts, expanding RBAC permissions for the verification process, and injecting necessary environment variables for the external-dns check.
+Here is a comprehensive Pull Request description for your script. You can copy-paste this directly into GitHub/GitLab.
 
 ---
 
-### PR Title Options
+### **PR Title:** feat: Add automated external-dns verification script with dynamic config detection
 
-* `feat: Refactor verification RBAC and inject DNS context variables`
-* `fix: Update verification job permissions and add environment configuration`
+### **Summary**
 
-### PR Description
+This PR introduces a robust Python automation script (`verify_external_dns.py`) and associated Kubernetes manifests to verify the end-to-end functionality of `external-dns` in our clusters.
 
-**Summary**
-This PR refactors the verification job to use the main application ServiceAccount instead of a dedicated verification SA, streamlines the RBAC permissions required for the integration tests, and injects new environment variables needed for the `external-dns` version check and Route53 zone validation.
+The script is designed to run as a Kubernetes Job in CI/CD. It dynamically inspects the running `external-dns` deployment to adapt its test strategy (Service vs. Istio Gateway) and verification logic (Sync vs. Upsert-Only), ensuring reliable testing across heterogeneous environments (Dev/Staging/Prod).
 
-**Key Changes**
+### **Key Changes**
 
-**1. RBAC & ServiceAccount Refactor**
+#### **1. New Python Verification Script (`verify_external_dns.py`)**
 
-* **Removed:** Deleted the dedicated `ServiceAccount` (`verification-{{ $app.name }}`).
-* **Updated:** Configured the verification Job to use the existing application ServiceAccount (`{{ $app.name }}`) via `serviceAccountName`.
-* **Permissions:** Updated the `Role` and `RoleBinding` to grant the ServiceAccount permissions to:
-* `create` and `delete` **Deployments** (apps/v1).
-* `create` and `delete` **Gateways** (networking.istio.io).
-* `get` and `list` **Pods**.
+* **Auto-Detection:** Automatically detects configuration by inspecting the running `external-dns` Pod arguments:
+* **Mode:** Detects `--policy=upsert-only` vs `sync`. Skips deletion checks if in upsert mode.
+* **Source:** Detects `--source=service` vs `--source=istio-gateway` to choose the correct test fixture.
+* **Zone Type:** Detects `--aws-zone-type=private` to ensure we target the correct Split-Horizon DNS zone in Route53.
 
 
-
-**2. Job Configuration & Environment Variables**
-
-* Added the following environment variables to the verification container to support the Python automation script:
-* `EXTERNAL_DNS_EXPECTED_VERSION`: Dynamically constructed from values (allows version matching).
-* `ENV`: Passes the cluster environment context.
-* `TEST_IMAGE`: Defines the alpine-k8s image used for testing.
-* `HOSTED_ZONE_NAME`: Implements logic to dynamically select the correct Route53 DNS zone based on the cluster region.
+* **Version Validation:** Optionally verifies the running image tag against an expected version to prevent regression testing against stale deployments.
+* **IAM Compliance:** Uses `list_hosted_zones` (client-side filtering) instead of `list_hosted_zones_by_name` to work around restricted IAM policies.
+* **Robust Cleanup:**
+* Guaranteed cleanup in a `finally` block.
+* Aggressively cleans orphaned TXT registry records (e.g., `cname-test...`) alongside A-records.
+* Handles AWS `ClientError` gracefully (ignoring "Not Found" errors).
 
 
 
-**Reasoning**
+#### **2. Test Manifests**
 
-* Consolidating the ServiceAccount simplifies the chart and reduces the number of resources managed.
-* The added RBAC permissions (Deployments/Gateways) are required for the verification script to spin up test resources to validate DNS record creation.
-* The `HOSTED_ZONE_NAME` and `EXPECTED_VERSION` are critical for the script to validate against the correct AWS Route53 zone and ensure the deployed `external-dns` matches the target version.
+* **`service-test.yaml`:** Standard fixture (Deployment + LoadBalancer Service) for clusters using the `service` source.
+* **`gateway-test.yaml`:** Istio fixture (Gateway resource) for clusters using the `istio-gateway` source.
+* **Templating:** Both manifests use `${TEST_NAMESPACE}` and `${TEST_HOSTNAME}` placeholders for safe, parallel execution.
+
+### **How It Works**
+
+1. **Pre-Flight:** Checks `external-dns` version and configuration (Sources, Policy, Zone Type).
+2. **Target Selection:** Resolves the AWS Route53 Hosted Zone ID using `boto3` pagination (client-side filtering).
+3. **Deploy:** Applies the correct manifest (Service or Gateway) to a verification namespace.
+4. **Verify Creation:** Polls Route53 until the A-record appears.
+5. **Verify Deletion (Sync Mode only):** Deletes K8s resources and ensures the record disappears from Route53.
+6. **Cleanup:** Force-deletes any remaining Route53 records (including TXT registry records) to prevent "zombie" records.
+
+### **Environment Variables**
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `TEST_HOSTNAME` | **Required.** The FQDN to test. | (derived from Helm) |
+| `HOSTED_ZONE_NAME` | **Required.** The Route53 zone to check. | (derived from Helm) |
+| `EXPECTED_VERSION` | Optional. Fails test if running version mismatches. | `None` |
+| `AWS_REGION` | AWS Region for Route53 calls. | `ap-east-1` |
+
+### **IAM Requirements**
+
+The execution role requires the following permissions:
+
+* `route53:ListHostedZones` (to find the Zone ID)
+* `route53:ListResourceRecordSets` (to verify propagation)
+* `route53:ChangeResourceRecordSets` (for cleanup)
+* `route53:GetHostedZone`
+
+### **Checklist**
+
+* [x] Script handles both `service` and `istio-gateway` sources.
+* [x] Script handles `upsert-only` (skips deletion check) and `sync` modes.
+* [x] Cleanup logic covers both A-records and TXT registry records.
+* [x] Logic falls back to `ListHostedZones` to avoid `AccessDenied` on `ListHostedZonesByName`.
