@@ -1,60 +1,30 @@
-def detect_external_dns_config(core_api, namespace, label_selector, expected_version=None) -> VerificationConfig:
+def get_hosted_zone_id(route53_client, hosted_zone_name, private_zone=False):
     """
-    Inspects the running external-dns Pod to extract Version, Mode, Sources, and Zone Type.
+    Finds the Zone ID using list_hosted_zones (iterating client-side).
+    Compatible with restricted IAM policies that deny ListHostedZonesByName.
     """
-    logger.info(f"🕵️ Inspecting external-dns in {namespace}...")
+    # Normalize to ensure trailing dot (AWS standard)
+    target_name = hosted_zone_name if hosted_zone_name.endswith(".") else f"{hosted_zone_name}."
     
-    # Defaults
-    mode = "sync"
-    sources = set()
-    is_private = False
-    detected_version = "unknown"
-
+    logger.info(f"🔍 Searching for Zone ID: {target_name} (Private={private_zone})...")
+    
     try:
-        pods = core_api.list_namespaced_pod(namespace, label_selector=label_selector)
-        if not pods.items:
-            logger.warning("   - No Pods found. Using defaults.")
-            return VerificationConfig("sync", {"service"}, False, "unknown")
+        # Use Paginator to handle accounts with many zones automatically
+        paginator = route53_client.get_paginator('list_hosted_zones')
         
-        pod = pods.items[0]
-        container = next((c for c in pod.spec.containers if c.name == "external-dns"), pod.spec.containers[0])
-        
-        # --- 1. Version Check ---
-        image_str = container.image
-        detected_version = image_str.split(":")[-1]
-        logger.info(f"   - Detected Version: {detected_version}")
+        for page in paginator.paginate():
+            for z in page['HostedZones']:
+                # 1. Check Exact Name Match
+                if z["Name"] == target_name:
+                    # 2. Check Private/Public Match (Critical for Split-Horizon)
+                    if z["Config"]["PrivateZone"] == private_zone:
+                        zone_id = z["Id"].split("/")[-1]
+                        logger.info(f"   - ✅ Found Zone ID: {zone_id}")
+                        return zone_id
+                        
+    except (ClientError, BotoCoreError) as e:
+        logger.error(f"   - AWS API Error: {e}")
+        raise
 
-        if expected_version:
-            # Normalize (remove 'v' prefix if present)
-            clean_detected = detected_version.lstrip("v")
-            clean_expected = expected_version.lstrip("v")
-            
-            if clean_detected != clean_expected:
-                raise RuntimeError(
-                    f"❌ VERSION MISMATCH: Expected '{expected_version}' but found '{detected_version}'"
-                )
-            logger.info("   - ✅ Version verification passed.")
-
-        # --- 2. Configuration Check ---
-        args = container.args or []
-        for arg in args:
-            if "--policy=upsert-only" in arg:
-                mode = "upsert-only"
-            if "--source=" in arg:
-                sources.add(arg.split("=", 1)[1])
-            if "--aws-zone-type=private" in arg:
-                logger.info("   - Detected Zone Type: PRIVATE")
-                is_private = True
-
-        if not sources:
-            sources.add("service")
-
-        logger.info(f"   - Config: Mode={mode.upper()} | Sources={sources} | PrivateZone={is_private}")
-        return VerificationConfig(mode, sources, is_private, detected_version)
-
-    except Exception as e:
-        logger.error(f"   - Detection failed: {e}")
-        # If strict version checking was requested and failed, re-raise the error
-        if expected_version:
-            raise
-        return VerificationConfig("sync", {"service"}, False, "unknown")
+    type_str = "Private" if private_zone else "Public"
+    raise ValueError(f"{type_str} Zone '{hosted_zone_name}' not found in this account.")
