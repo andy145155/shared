@@ -1,57 +1,20 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
-  name: external-dns-test-fixture
-  namespace: ${TEST_NAMESPACE}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: external-dns-test
-  template:
-    metadata:
-      labels:
-        app: external-dns-test
-    spec:
-      containers:
-        - name: nginx
-          image: nginx:alpine
-          ports:
-            - containerPort: 80
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: external-dns-test-service
-  namespace: ${TEST_NAMESPACE}
+  name: test-ingress
   annotations:
+    # Add any specific external-dns annotations if needed
     external-dns.alpha.kubernetes.io/hostname: ${TEST_HOSTNAME}
-    # Optional generic LB settings
-    service.beta.kubernetes.io/aws-load-balancer-type: external
-    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
 spec:
-  type: LoadBalancer
-  selector:
-    app: external-dns-test
-  ports:
-    - protocol: TCP
-      port: 80
-      targetPort: 80
-
-apiVersion: networking.istio.io/v1beta1
-kind: Gateway
-metadata:
-  name: external-dns-test-gateway
-  namespace: ${TEST_NAMESPACE}
-spec:
-  # CRITICAL: This must match the label on your EXISTING Istio Ingress Deployment
-  selector:
-    istio: ingressgateway
-  servers:
-  - port:
-      number: 80
-      name: http
-      protocol: HTTP
-    hosts:
-    - "${TEST_HOSTNAME}"
+  ingressClassName: nginx # Change to your class (e.g., alb, istio)
+  rules:
+  - host: ${TEST_HOSTNAME}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: test-service-backend
+            port:
+              number: 80

@@ -1,87 +1,88 @@
-# main.py
-import sys
-import time
-import logging
-import signal
-from lib import k8s, external_dns # (Assuming you moved detection here)
-from lib.k8s import initialize_k8s_clients, apply_resource, k8s_resource_manager
+# lib/test_runner.py
+from lib import k8s, route53
 
-# ... imports ...
-
-# 1. DEFINE THE MAP
-# keys match the 'source' strings from ExternalDNS args (service, ingress, gateway-httproute)
-SOURCE_TEST_MAP = {
-    "service": "manifests/service.yaml",
-    "ingress": "manifests/ingress.yaml",
-    "istio-gateway": "manifests/gateway.yaml", # or "gateway-httproute" depending on what external-dns reports
-}
-
-def run_test_suite(source_name, manifest_path, core, apps, custom, route53, zone_id):
-    """
-    Helper function to run the full cycle for ONE source.
-    """
-    logger.info(f"\n🔹 STARTING TEST FOR SOURCE: {source_name}")
+def run_test_suite(source_name: str, manifest_path: str, clients: K8sClients, route53_client, config):
+    core, apps, net, custom = clients
+    unique_hostname = f"{source_name}-test.{config.base_domain}"
     
-    # Pass the specific manifest_path to the manager
-    with k8s_resource_manager(core, apps, custom, manifest_path, TEST_NAMESPACE) as resources:
-        
-        # Deploy
-        for res in resources:
-            apply_resource(core, apps, custom, res, TEST_NAMESPACE)
+    logger.info(f"🔹 TESTING SOURCE: {source_name}")
 
-        # Verify
-        # Note: Ideally, each manifest uses a unique hostname to avoid caching collisions
-        # e.g. service-test.example.com vs ingress-test.example.com
-        if not wait_for_dns_propagation(route53, zone_id, TEST_HOSTNAME):
-             raise RuntimeError(f"DNS Propagation Failed for {source_name}")
-             
-        # Optional: Sync mode check logic can go here (omitted for brevity)
-    
-    logger.info(f"✅ SOURCE {source_name} PASSED\n")
-
-
-def main():
-    signal.signal(signal.SIGTERM, handle_sigterm)
-    exit_code = 0
-    
     try:
-        # 1. Clients
-        core_api, apps_api, custom_api = initialize_k8s_clients()
-        route53_client = get_route53_client()
+        # --- 1. K8s Lifecycle (Context Manager) ---
+        # When this block exits, K8s resources are deleted automatically.
+        with k8s.k8s_resource_manager(core, apps, net, custom, manifest_path, "test-ns", unique_hostname) as resources:
+            
+            # Deploy
+            for res in resources:
+                k8s.apply_resource(core, apps, net, custom, res, "test-ns")
 
-        # 2. Detect Configuration (Get list of sources)
-        # Ensure your detect function returns a list, e.g. ['service', 'ingress']
-        config = detect_external_dns_config(core_api) 
-        
-        logger.info(f"ExternalDNS Version: {config.version}")
-        logger.info(f"Enabled Sources: {config.sources}")
+            # Verify Creation
+            if not route53.wait_for_propagation(route53_client, config.zone_id, unique_hostname):
+                 raise RuntimeError(f"Creation Verification failed for {source_name}")
 
-        # 3. Find Zone
-        zone_id = get_hosted_zone_id(route53_client, HOSTED_ZONE_NAME, config.private_zone)
+        # --- 2. Verify Deletion (ExternalDNS Logic) ---
+        # K8s resources are gone. Now we check if ExternalDNS did its job.
+        if config.policy == "sync":
+            if not route53.wait_for_deletion(route53_client, config.zone_id, unique_hostname):
+                raise RuntimeError(f"Deletion Verification failed for {source_name}")
 
-        # 4. Filter Sources to Test
-        # We only test sources that are BOTH enabled in the cluster AND defined in our map
-        active_sources = [s for s in config.sources if s in SOURCE_TEST_MAP]
+    except Exception:
+        logger.exception(f"❌ Test Failed for {source_name}")
+        raise # Re-raise so main.py knows it failed
 
-        if not active_sources:
-            logger.warning("No testable sources detected! (Check SOURCE_TEST_MAP vs Cluster Args)")
-            return
+    finally:
+        # --- 3. THE SAFETY NET ---
+        # Always force cleanup the Route53 record.
+        # This saves money and prevents conflicts if ExternalDNS failed.
+        logger.info(f"🧹 Finalizing cleanup for {unique_hostname}...")
+        route53.cleanup_record(route53_client, config.zone_id, unique_hostname)
 
-        # 5. LOOP THROUGH SOURCES
-        for source in active_sources:
-            manifest_path = SOURCE_TEST_MAP[source]
-            run_test_suite(
-                source, 
-                manifest_path, 
-                core_api, apps_api, custom_api, route53_client, 
-                zone_id
+# lib/route53.py
+import logging
+from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
+
+def cleanup_record(route53_client, zone_id, hostname):
+    """
+    Force deletes a TXT and A record if they exist.
+    Suppresses errors if the record is already gone.
+    """
+    # We typically need to clean both the A record and the TXT owner record
+    for record_type in ["A", "TXT"]:
+        try:
+            # 1. We must GET the record first to know its current 'TTL' and 'Value'
+            # Route53 DELETE requires the exact state of the record to match.
+            response = route53_client.list_resource_record_sets(
+                HostedZoneId=zone_id,
+                StartRecordName=hostname,
+                StartRecordType=record_type,
+                MaxItems="1"
             )
+            
+            sets = response.get('ResourceRecordSets', [])
+            
+            # Check if we actually found the exact record we are looking for
+            if not sets or sets[0]['Name'].rstrip('.') != hostname.rstrip('.') or sets[0]['Type'] != record_type:
+                logger.debug(f"Record {hostname} ({record_type}) already deleted.")
+                continue
 
-        logger.info("🎉 ALL TEST SUITES COMPLETED SUCCESSFULLY")
+            # 2. Issue the Delete
+            change_batch = {
+                'Changes': [{
+                    'Action': 'DELETE',
+                    'ResourceRecordSet': sets[0]
+                }]
+            }
+            
+            route53_client.change_resource_record_sets(
+                HostedZoneId=zone_id,
+                ChangeBatch=change_batch
+            )
+            logger.info(f"Force deleted orphan record: {hostname} ({record_type})")
 
-    except Exception as e:
-        logger.exception(f"Critical Failure: {e}")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'InvalidChangeBatch':
+                logger.warning(f"Could not delete {hostname}: Record might have changed or does not exist.")
+            else:
+                logger.warning(f"Route53 Cleanup Error: {e}")
