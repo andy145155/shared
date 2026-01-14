@@ -1,70 +1,128 @@
-Here is a comprehensive Pull Request description for your script. You can copy-paste this directly into GitHub/GitLab.
+Here is a professional, production-ready `README.md` for your project.
+
+I have structured it to cover **Setup, Usage, and Architecture**, making it easy for your team (or future you) to onboard.
 
 ---
 
-### **PR Title:** feat: Add automated external-dns verification script with dynamic config detection
+# External-DNS Verification Automation
 
-### **Summary**
+A robust automated verification suite designed to validate the end-to-end integration between **Kubernetes**, **ExternalDNS**, and **AWS Route53**.
 
-This PR introduces a robust Python automation script (`verify_external_dns.py`) and associated Kubernetes manifests to verify the end-to-end functionality of `external-dns` in our clusters.
+This script performs "Black Box" testing by deploying real Kubernetes resources (Service, Ingress, Istio Gateway) and verifying that the corresponding DNS records are correctly propagated to—and subsequently removed from—AWS Route53.
 
-The script is designed to run as a Kubernetes Job in CI/CD. It dynamically inspects the running `external-dns` deployment to adapt its test strategy (Service vs. Istio Gateway) and verification logic (Sync vs. Upsert-Only), ensuring reliable testing across heterogeneous environments (Dev/Staging/Prod).
+## 🚀 Features
 
-### **Key Changes**
+* **Smart Detection:** Automatically detects the running configuration of `external-dns` (e.g., source types, `upsert-only` mode, ownership registry) by inspecting the live Pod.
+* **Idempotency:** Safe to run repeatedly. Includes robust cleanup logic to prevent "zombie" resources in K8s or Route53.
+* **Fail-Safe:** Handles `SIGTERM` signals for graceful shutdown in Kubernetes/ArgoCD environments.
+* **Modular Architecture:** Separation of concerns between Kubernetes logic, AWS interactions, and test orchestration.
 
-#### **1. New Python Verification Script (`verify_external_dns.py`)**
+## 📋 Prerequisites
 
-* **Auto-Detection:** Automatically detects configuration by inspecting the running `external-dns` Pod arguments:
-* **Mode:** Detects `--policy=upsert-only` vs `sync`. Skips deletion checks if in upsert mode.
-* **Source:** Detects `--source=service` vs `--source=istio-gateway` to choose the correct test fixture.
-* **Zone Type:** Detects `--aws-zone-type=private` to ensure we target the correct Split-Horizon DNS zone in Route53.
+* **Python 3.11+**
+* **Kubernetes Cluster** with `external-dns` installed.
+* **AWS Credentials** with Route53 write permissions.
 
+### Required IAM Permissions
 
-* **Version Validation:** Optionally verifies the running image tag against an expected version to prevent regression testing against stale deployments.
-* **IAM Compliance:** Uses `list_hosted_zones` (client-side filtering) instead of `list_hosted_zones_by_name` to work around restricted IAM policies.
-* **Robust Cleanup:**
-* Guaranteed cleanup in a `finally` block.
-* Aggressively cleans orphaned TXT registry records (e.g., `cname-test...`) alongside A-records.
-* Handles AWS `ClientError` gracefully (ignoring "Not Found" errors).
+The script requires the following AWS IAM actions on the target Hosted Zone:
 
+* `route53:ListHostedZones`
+* `route53:ListResourceRecordSets`
+* `route53:ChangeResourceRecordSets`
+* `route53:GetChange`
 
+## 🛠️ Configuration
 
-#### **2. Test Manifests**
+The script is configured via Environment Variables.
 
-* **`service-test.yaml`:** Standard fixture (Deployment + LoadBalancer Service) for clusters using the `service` source.
-* **`gateway-test.yaml`:** Istio fixture (Gateway resource) for clusters using the `istio-gateway` source.
-* **Templating:** Both manifests use `${TEST_NAMESPACE}` and `${TEST_HOSTNAME}` placeholders for safe, parallel execution.
+| Variable | Description | Required | Default |
+| --- | --- | --- | --- |
+| `HOSTED_ZONE_NAME` | The domain name of the AWS Hosted Zone (e.g., `example.com.`) | **Yes** | - |
+| `TEST_IMAGE` | Docker image to use for the dummy test pods | **Yes** | - |
+| `EXTERNAL_DNS_EXPECTED_VERSION` | version of external-dns to verify against (e.g. `v0.13.5`) | **Yes** | - |
+| `TEST_NAMESPACE` | K8s namespace where test resources will be deployed | No | `verification-external-dns` |
+| `AWS_REGION` | AWS Region for Route53 calls | No | `ap-east-1` |
 
-### **How It Works**
+## 📦 Installation & Usage
 
-1. **Pre-Flight:** Checks `external-dns` version and configuration (Sources, Policy, Zone Type).
-2. **Target Selection:** Resolves the AWS Route53 Hosted Zone ID using `boto3` pagination (client-side filtering).
-3. **Deploy:** Applies the correct manifest (Service or Gateway) to a verification namespace.
-4. **Verify Creation:** Polls Route53 until the A-record appears.
-5. **Verify Deletion (Sync Mode only):** Deletes K8s resources and ensures the record disappears from Route53.
-6. **Cleanup:** Force-deletes any remaining Route53 records (including TXT registry records) to prevent "zombie" records.
+### 1. Local Development
 
-### **Environment Variables**
+We recommend using [uv](https://github.com/astral-sh/uv) or `pip` for dependency management.
 
-| Variable | Description | Default |
-| --- | --- | --- |
-| `TEST_HOSTNAME` | **Required.** The FQDN to test. | (derived from Helm) |
-| `HOSTED_ZONE_NAME` | **Required.** The Route53 zone to check. | (derived from Helm) |
-| `EXPECTED_VERSION` | Optional. Fails test if running version mismatches. | `None` |
-| `AWS_REGION` | AWS Region for Route53 calls. | `ap-east-1` |
+```bash
+# Install dependencies
+pip install -r requirements.txt
 
-### **IAM Requirements**
+# Export required variables
+export HOSTED_ZONE_NAME="dev.example.com."
+export TEST_IMAGE="nginx:alpine"
+export EXTERNAL_DNS_EXPECTED_VERSION="v0.14.0"
 
-The execution role requires the following permissions:
+# Run the verification
+python3 main.py
 
-* `route53:ListHostedZones` (to find the Zone ID)
-* `route53:ListResourceRecordSets` (to verify propagation)
-* `route53:ChangeResourceRecordSets` (for cleanup)
-* `route53:GetHostedZone`
+```
 
-### **Checklist**
+### 2. Running as a Kubernetes Job (or ArgoCD Hook)
 
-* [x] Script handles both `service` and `istio-gateway` sources.
-* [x] Script handles `upsert-only` (skips deletion check) and `sync` modes.
-* [x] Cleanup logic covers both A-records and TXT registry records.
-* [x] Logic falls back to `ListHostedZones` to avoid `AccessDenied` on `ListHostedZonesByName`.
+This script is designed to run as a **Post-Sync Hook** in ArgoCD to verify deployments automatically.
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: verify-external-dns
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+spec:
+  template:
+    spec:
+      serviceAccountName: verification-sa # Needs RBAC to create Service/Ingress
+      containers:
+        - name: verifier
+          image: <your-repo>/external-dns-verifier:latest
+          envFrom:
+            - configMapRef:
+                name: verifier-config
+
+```
+
+## 🧠 How It Works
+
+The script follows a **Setup → Verify → Cleanup** lifecycle for each test case (Service, Ingress, Gateway):
+
+1. **Environment Check:** Validates K8s connectivity and AWS credentials.
+2. **Discovery:** Inspects the active `external-dns` Pod to determine which sources are enabled (e.g., checks if `--source=istio-gateway` is active).
+3. **Deployment:** Creates a temporary K8s resource (e.g., a Service with annotation `external-dns.alpha.kubernetes.io/hostname`).
+4. **Propagation Check:** Polls AWS Route53 API until the TXT and A records appear.
+5. **Teardown:** Deletes the K8s resource.
+6. **Cleanup Verification:** Polls AWS Route53 to ensure records are removed (unless `upsert-only` mode is detected).
+
+## 📂 Project Structure
+
+```text
+.
+├── main.py                 # Entry point (Controller)
+├── lib/
+│   ├── config.py           # Configuration & Env Var validation
+│   ├── k8s.py              # Kubernetes Client & Resource Management
+│   ├── route53.py          # AWS Boto3 logic & Pagination
+│   ├── external_dns.py     # Logic to inspect the running external-dns installation
+│   └── utils.py            # Test runners and Orchestration logic
+├── manifests/              # YAML templates for test resources
+│   ├── service.yaml
+│   ├── ingress.yaml
+│   └── gateway.yaml
+└── requirements.txt        # Python dependencies
+
+```
+
+## 🤝 Contributing
+
+1. Ensure all new logic is added to the relevant module in `lib/`.
+2. Run linting before committing:
+```bash
+ruff check .
+
+```
