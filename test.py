@@ -1,52 +1,36 @@
+# log_config.py
 import logging
-import structlog
 import sys
+import structlog
 
-def setup_logging():
-    # 1. Create the specific handlers for your files
-    
-    # Handler for ALL logs
-    file_handler_all = logging.FileHandler("all.json")
-    file_handler_all.setLevel(logging.INFO)
-    
-    # Handler for ERROR logs only
-    file_handler_error = logging.FileHandler("errors.json")
-    file_handler_error.setLevel(logging.ERROR)
-    # Optional: Add the specific filter if setLevel isn't strict enough for your needs
-    # file_handler_error.addFilter(ErrorFilter()) 
-
-    # 2. Configure the Standard Library Logger
-    # We need a formatter that just passes the message through, 
-    # because structlog will have already converted it to JSON.
+def configure_logger():
+    # 1. Configure Standard Library Logging (for 3rd party libs)
+    # We want everything to go to stdout
     logging.basicConfig(
         format="%(message)s",
+        stream=sys.stdout,
         level=logging.INFO,
-        handlers=[
-            logging.StreamHandler(sys.stdout), # Keep logging to console
-            file_handler_all,
-            file_handler_error
-        ]
     )
 
-    # 3. Configure Structlog to wrap Standard Logging
+    # 2. Configure Structlog
     structlog.configure(
         processors=[
-            # Merge context vars (thread local storage)
+            # Add context vars (like request_id if using contextvars)
             structlog.contextvars.merge_contextvars,
-            # Add log level and timestamp
+            # Add log level
             structlog.processors.add_log_level,
+            # Add timestamp (ISO format is best for Datadog)
             structlog.processors.TimeStamper(fmt="iso"),
-            # If an exception is present, format it nicely
+            # If an exception was raised, format it nicely
             structlog.processors.format_exc_info,
-            # Render the final event as a JSON string
+            # Datadog prefers 'message' over 'event', so we rename it
+            structlog.processors.EventRenamer("message"),
+            # Render as JSON
             structlog.processors.JSONRenderer()
         ],
-        # This tells structlog: "After processing, pass the result to logging.getLogger()"
+        # This connects structlog to the standard logging module
         logger_factory=structlog.stdlib.LoggerFactory(),
-        # This tells structlog: "Use the standard library's log methods (info, error, etc.)"
+        # This wrapper ensures the standard library calls use the processors above
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,
     )
-
-# Run the setup
-setup_logging()
