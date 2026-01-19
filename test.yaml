@@ -1,20 +1,13 @@
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
 metadata:
-  name: test-ingress
-  annotations:
-    # Add any specific external-dns annotations if needed
-    external-dns.alpha.kubernetes.io/hostname: ${TEST_HOSTNAME}
-spec:
-  ingressClassName: nginx # Change to your class (e.g., alb, istio)
-  rules:
-  - host: ${TEST_HOSTNAME}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: test-service-backend
-            port:
-              number: 80
+  name: namespace-admin
+  namespace: target-namespace-name
+subjects:
+- kind: ServiceAccount
+  name: my-service-account
+  namespace: management-ns
+roleRef:
+  kind: ClusterRole
+  name: admin # This is a built-in K8s role
+  apiGroup: rbac.authorization.k8s.io
