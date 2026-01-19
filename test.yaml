@@ -1,13 +1,31 @@
+# 1. Define the ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRole
 metadata:
-  name: namespace-admin
-  namespace: target-namespace-name
+  name: namespace-manager
+rules:
+# Rule A: Allow deleting/getting ONLY the specific namespace
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["delete", "get"]
+  resourceNames: ["target-namespace-name"] # <--- "resourceNames" works perfectly for DELETE
+
+# Rule B: Allow creating namespaces (Must be global)
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["create"] # <--- Cannot use "resourceNames" here. This allows creating ANY namespace.
+
+---
+# 2. Bind it to your ServiceAccount (Same as before)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: allow-manage-specific-ns
 subjects:
 - kind: ServiceAccount
   name: my-service-account
   namespace: management-ns
 roleRef:
   kind: ClusterRole
-  name: admin # This is a built-in K8s role
+  name: namespace-manager
   apiGroup: rbac.authorization.k8s.io
