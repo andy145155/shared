@@ -1,158 +1,134 @@
-Here is the updated, industry-standard `README.md` template.
+This template is designed to be flexible. I've used `[...]` for placeholders and marked sections that should be deleted if they aren't relevant (like ArgoCD hooks for a local-only script).
 
-I have updated it to include:
-
-* **Modular "Execution Context" sections**: You can keep/remove sections depending on if the script runs on ArgoCD, locally only, or both.
-* **Useful Links**: A dedicated area for Runbooks and Container Registry links.
-* **Troubleshooting**: A standard table to capture common failure modes (a lifesaver for on-call engineers).
-* **`uv` Specifics**: Explicit commands for running with environment variables.
+I added the **Troubleshooting** and **Useful Links** sections as requested, and refined the **Execution** section to clearly distinguish between Local vs. Remote (ArgoCD) usage.
 
 ---
 
-### 📝 How to use this template
+# `README.md` Template
 
-1. Copy the code block below into your `README.md`.
-2. Replace any text inside `[...]` with your specific details.
-3. **Delete** sections that don't apply (e.g., if it's a local-only script, delete the "ArgoCD" section).
-
----
+*(Copy the content below into your project's `README.md` and replace the bracketed text `[...]`)*
 
 ```markdown
-# [Script / Tool Name]
+# [Script Name / Tool Name]
 
-> [One-sentence summary. E.g. "Automated verification script for external-dns release candidates."]
-
-## 🔗 Useful Links
-* **Runbook:** [Link to Notion/Confluence Runbook]
-* **Container Image:** `[ghcr.io/org/image-name:tag]`
-* **Related Repo:** [Link to related Infrastructure or Config repo]
-* **[Other Link]:** [Link]
+> [Brief, one-sentence description of what this automation does. E.g., "Automated verification suite for ExternalDNS releases running on ArgoCD."]
 
 ## 📖 Overview
-[Brief paragraph. What problem does this solve? Who uses it?]
+[Provide a short paragraph explaining the problem this script solves. Who is the user? Is it run manually or via CI/CD?]
 
 **Key Capabilities:**
-* [Feature 1]
-* [Feature 2]
+* [Feature 1: e.g., Detects running configuration automatically]
+* [Feature 2: e.g., Cleans up resources after failure]
+* [Feature 3: e.g., Supports multiple verify targets]
 
 ## 🧠 How It Works
-[Briefly describe the logic flow. Keep it high-level.]
+[Briefly describe the architectural flow. Bullet points or a simple text diagram work best.]
 
-1.  **Init:** [e.g., Load config from Env Vars and authenticate to K8s.]
-2.  **Action:** [e.g., Deploys a test pod.]
-3.  **Validation:** [e.g., Polls API for X seconds.]
-4.  **Result:** [e.g., Exits 0 on success, 1 on failure.]
+The script follows this execution lifecycle:
+1.  **Discovery:** [e.g., Checks the k8s cluster for the active deployment.]
+2.  **Execution:** [e.g., Deploys a dummy service and polls Route53.]
+3.  **Verification:** [e.g., Validates that records exist in AWS.]
+4.  **Teardown:** [e.g., Removes all test resources.]
 
----
-
-## ⚙️ Configuration
-This tool is configured via Environment Variables.
+## 🛠️ Configuration
+The application is configured entirely via Environment Variables.
 
 | Variable | Description | Required | Default |
 | :--- | :--- | :--- | :--- |
-| `TARGET_ENV` | Target environment (`dev`, `staging`, `prod`) | **Yes** | - |
-| `LOG_LEVEL` | Logging verbosity (`INFO`, `DEBUG`) | No | `INFO` |
-| `[CUSTOM_VAR]` | [Description] | [Yes/No] | [Value] |
+| `TARGET_ENV` | The target environment (dev/staging/prod) | **Yes** | - |
+| `AWS_REGION` | AWS Region for API calls | No | `ap-east-1` |
+| `[VAR_NAME]` | [Description] | [Yes/No] | [Value] |
 
----
+## 🔗 Useful Links
+* **Runbook:** [Link to Confluence/Notion Runbook]
+* **Related Repos:**
+    * [Repo Name](https://github.com/...) - [Description]
+* **Docker Image:** [Link to ECR/Artifactory]
+* **Slack Channel:** #[channel-name]
 
-## 🚀 Execution Context
-*[Select the sections below that apply to your script and delete the others]*
+## 🚀 Execution Guide
 
-### [Option A: ArgoCD Hook]
-This script is designed to run automatically as an **ArgoCD PostSync Hook**.
-* **Trigger:** Runs automatically after syncing `[Application Name]`.
-* **Location:** Defined in `[path/to/manifest.yaml]`.
-* **Logs:** View logs in the ArgoCD UI under the "Job" resource.
+### 1. Local Development
+We recommend using **`uv`** for Python projects to manage dependencies and execution.
 
-### [Option B: Local Script]
-This script is intended to be run manually by engineers for [adhoc tasks / debugging].
+**Prerequisites:**
+* **Language Runtime:** [e.g., Python 3.12+]
+* **Tools:** `kubectl`, `aws-cli`
+* **Access:** Valid AWS credentials and Kubeconfig context.
 
----
-
-## 💻 Local Development & Usage
-
-### Prerequisites
-* **Language:** [Python 3.12+ (managed by `uv`) / Go 1.21+ / Bash]
-* **Access:** Valid AWS credentials and `kubectl` context for the target cluster.
-
-### Running with `uv` (Python)
-We use `uv` for execution. No manual virtualenv activation is required.
-
-**1. Basic Run:**
+**How to Run:**
 ```bash
-uv run main.py
-
-```
-
-**2. Running with Environment Variables:**
-You can pass variables inline or use a `.env` file.
-
-*Using inline flags (One-off):*
-
-```bash
-TARGET_ENV=dev LOG_LEVEL=DEBUG uv run main.py
-
-```
-
-*Using a .env file (Recommended):*
-
-```bash
-# 1. Create .env
+# 1. Create a local .env file (Optional but recommended)
 echo "TARGET_ENV=dev" > .env
 
-# 2. Run with env file
+# 2. Run the script via uv
+# The --env-file flag automatically loads variables from your .env
 uv run --env-file .env main.py
 
-```
-
-### [Alternative: Go / Bash]
-
-*[Delete if using Python]*
-
-```bash
-# Go
-go run main.go
-
-# Bash
-./scripts/run.sh
+# OR pass variables inline
+TARGET_ENV=dev uv run main.py
 
 ```
 
----
+### 2. Remote Execution (ArgoCD)
+
+*[Delete this section if this script is local-only]*
+
+This script is designed to run as an **ArgoCD Hook** (e.g., PostSync) to verify deployments automatically.
+
+**Trigger:**
+
+* Runs automatically after a Sync on the `[Application Name]` app.
+* Can be triggered manually via the ArgoCD UI by deleting the `Job`.
+
+**Configuration:**
+The Job manifest is located at: `[Path to Job YAML in repo]`.
 
 ## 🔐 Permissions
 
-To run successfully, the environment (local or remote) needs the following permissions.
+*[Required for both Local and Remote execution]*
 
-**AWS IAM:**
+### AWS IAM
 
-* `[Service/Role Name]`
-* **Actions:** `[e.g., route53:ListHostedZones, s3:GetObject]`
+The runner requires the following permissions (via IRSA or local credentials):
 
-**Kubernetes RBAC:**
+* **Policy:** `[e.g., AmazonRoute53DomainsFullAccess]`
+* **Specific Actions:**
+* `route53:ChangeResourceRecordSets`
+* `[Other Actions]`
 
-* **Resources:** `[e.g., Deployments, Services]`
-* **Verbs:** `[e.g., get, list, create, delete]`
 
----
+
+### Kubernetes RBAC
+
+The runner requires a `Role` or `ClusterRole` with access to:
+
+* `[apiGroup/Resource]: [verbs]` (e.g., `networking.k8s.io/ingresses: [create, delete]`)
 
 ## ❓ Troubleshooting
 
 | Error Message / Symptom | Possible Cause | Solution |
 | --- | --- | --- |
-| `[Example: 403 Forbidden]` | [Missing IAM role or expired token] | [Run `aws sso login` or check IRSA role] |
-| `[Example: Timeout waiting for X]` | [Network policy or delay in propagation] | [Check VPC settings or increase `TIMEOUT_SEC`] |
+| `ResourceNotFoundException` | AWS Credentials or Region incorrect | Check `AWS_REGION` and `~/.aws/credentials`. |
+| `Forbidden: User cannot list...` | Missing K8s RBAC role | Verify the Service Account has the correct Role bound. |
+| `Script hangs at Step 2` | Network policy or Security Group blocking API | Check Security Groups for the Pod. |
+
+## 📂 Project Structure
+
+```text
+.
+├── main.py                 # Entry point
+├── lib/                    # Core logic libraries
+├── manifests/              # K8s YAML templates (if applicable)
+├── pyproject.toml          # Python dependencies (managed by uv)
+└── README.md
+
+```
 
 ---
 
-## 📝 Notes & Future Work
-
-*[Optional: Add any tech debt, known limitations, or future plans here]*
-
-* [Note 1]
-* [Note 2]
+*[Add any additional sections below as needed, e.g., ## Architecture Diagram, ## Release Process]*
 
 ```
-[Add any additional sections below as needed, e.g., ## Architecture Diagram, ## Release Process]
+
 ```
