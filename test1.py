@@ -1,135 +1,62 @@
-from kubernetes import client, config
-from kubernetes.client.rest import ApiException
+# lib/verification_runner.py
+import logging
+from lib import k8s, route53, external_dns, utils, config
 
-# 1. Load Config (In-Cluster)
-try:
-    config.load_incluster_config()
-except config.ConfigException:
-    config.load_kube_config() # For local testing
+logger = logging.getLogger(__name__)
 
-# 2. Clients
-v1 = client.CoreV1Api()
-rbac_v1 = client.RbacAuthorizationV1Api()
-networking_v1 = client.NetworkingV1Api()
-custom_objs = client.CustomObjectsApi() # For Istio
-
-# 3. Constants
-VERIFICATION_NS = "verification-external-dns"
-SA_NAME = "external-dns"
-SA_NAMESPACE = "external-dns"
-STRICT_ROLE_NAME = "verification-job-rules"
-
-def run_verification_flow():
-    print(f"--- Starting Verification in {VERIFICATION_NS} ---")
-
-    # A. Create Namespace
-    print(f"1. Creating Namespace: {VERIFICATION_NS}...")
-    ns_body = client.V1Namespace(metadata=client.V1ObjectMeta(name=VERIFICATION_NS))
-    try:
-        v1.create_namespace(body=ns_body)
-    except ApiException as e:
-        if e.status == 409:
-            print(" -> Namespace already exists.")
-        else:
-            raise
-
-    # B. Bootstrap Permissions (Self-Binding)
-    print("2. Bootstrapping Strict Permissions...")
-    # We use a Dict here to avoid import issues with V1Subject
-    subject_dict = {
-        "kind": "ServiceAccount",
-        "name": SA_NAME,
-        "namespace": SA_NAMESPACE
-    }
-
-    binding = client.V1RoleBinding(
-        metadata=client.V1ObjectMeta(name="verification-runner", namespace=VERIFICATION_NS),
-        subjects=[subject_dict],
-        role_ref=client.V1RoleRef(
-            kind="ClusterRole",
-            name=STRICT_ROLE_NAME, # <--- Binding the Strict Rules
-            api_group="rbac.authorization.k8s.io"
-        )
-    )
+def execute_full_verification() -> bool:
+    """
+    Orchestrates the Setup -> Discovery -> Test -> Teardown lifecycle.
+    Returns: True if all tests passed, False otherwise.
+    """
+    # 1. Initialize Clients
+    logger.info("Initializing clients...")
+    k8s_clients = k8s.initialize_clients()
+    route53_client = route53.initialize_client()
     
-    try:
-        rbac_v1.create_namespaced_role_binding(namespace=VERIFICATION_NS, body=binding)
-        print(" -> Permissions bound successfully.")
-    except ApiException as e:
-        if e.status == 409:
-            print(" -> Binding already exists.")
-        else:
-            print(f"!!! Error binding permissions: {e}")
-            raise
+    # 2. Infrastructure Setup (Namespace, Roles)
+    # The Context Manager ensures this is DELETED even if the script crashes.
+    with k8s.infrastructure_manager(k8s_clients, config.TEST_NAMESPACE, cleanup=True):
+        
+        # 3. Discovery (Find what to test)
+        # We do this INSIDE the context so if it fails, namespace is still cleaned.
+        try:
+            ext_dns_config = external_dns.get_config(k8s_clients)
+            
+            # Filter active sources based on what is enabled in the pod
+            active_sources = [
+                s for s in ext_dns_config.sources 
+                if s in config.SOURCE_MANIFESTS_MAP
+            ]
+            
+            if not active_sources:
+                logger.error("No testable sources detected in external-dns config!")
+                return False
 
-    # C. Create Ingress (Strict Mode: Blind Create)
-    print("3. Creating Ingress (Blind)...")
-    ingress_manifest = {
-        "apiVersion": "networking.k8s.io/v1",
-        "kind": "Ingress",
-        "metadata": {
-            "name": "test-ingress", 
-            "namespace": VERIFICATION_NS,
-            "annotations": {"external-dns.alpha.kubernetes.io/hostname": "test.example.com"}
-        },
-        "spec": {
-            "rules": [{
-                "host": "test.example.com",
-                "http": {"paths": [{"path": "/", "pathType": "Prefix", "backend": {"service": {"name": "test-svc", "port": {"number": 80}} }}]}
-            }]
-        }
-    }
+            # 4. Run Test Suite for each source
+            failed_sources = []
+            for source in active_sources:
+                manifest_path = config.SOURCE_MANIFESTS_MAP[source]
+                try:
+                    utils.run_test_suite(
+                        source_name=source,
+                        manifest_path=manifest_path,
+                        k8s_clients=k8s_clients,
+                        route53_client=route53_client,
+                        zone_id=route53.get_hosted_zone_id(route53_client, ext_dns_config.private_zone),
+                        external_mode=ext_dns_config.mode
+                    )
+                except Exception as e:
+                    # Log the specific error but continue to the next source
+                    logger.error(f"Test failed for source '{source}': {e}")
+                    failed_sources.append(source)
+            
+            if failed_sources:
+                logger.error(f"The following sources failed: {failed_sources}")
+                return False
+                
+            return True
 
-    try:
-        networking_v1.create_namespaced_ingress(namespace=VERIFICATION_NS, body=ingress_manifest)
-        print(" -> Ingress created.")
-    except ApiException as e:
-        if e.status == 409:
-            print(" -> Ingress already exists (Cannot update due to strict permissions).")
-        else:
-            raise
-
-    # D. Create Istio Gateway (Custom Resource)
-    print("4. Creating Istio Gateway (Blind)...")
-    gateway_manifest = {
-        "apiVersion": "networking.istio.io/v1alpha3",
-        "kind": "Gateway",
-        "metadata": {"name": "test-gateway", "namespace": VERIFICATION_NS},
-        "spec": {
-            "selector": {"istio": "ingressgateway"},
-            "servers": [{"port": {"number": 80, "name": "http", "protocol": "HTTP"}, "hosts": ["*"]}]
-        }
-    }
-
-    try:
-        custom_objs.create_namespaced_custom_object(
-            group="networking.istio.io",
-            version="v1alpha3",
-            namespace=VERIFICATION_NS,
-            plural="gateways",
-            body=gateway_manifest
-        )
-        print(" -> Gateway created.")
-    except ApiException as e:
-        if e.status == 409:
-            print(" -> Gateway already exists.")
-        else:
-            raise
-
-def cleanup():
-    print(f"\n--- Cleaning Up {VERIFICATION_NS} ---")
-    try:
-        v1.delete_namespace(name=VERIFICATION_NS)
-        print(" -> Namespace deleted.")
-    except ApiException as e:
-        if e.status == 404:
-            print(" -> Namespace already gone.")
-        else:
-            print(f"!!! Error deleting namespace: {e}")
-
-if __name__ == "__main__":
-    try:
-        run_verification_flow()
-        # verify_dns_propagation() # <--- Your logic here
-    finally:
-        cleanup()
+        except Exception as e:
+            logger.exception("Unexpected error during verification logic")
+            return False

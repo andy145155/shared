@@ -1,64 +1,52 @@
-def cleanup_route53_force(route53_client, zone_id, dns_name):
+# lib/utils.py
+import logging
+import time
+from lib import k8s, route53, config
+
+logger = logging.getLogger(__name__)
+
+def ensure_clean_state(route53_client, zone_id, record_name):
+    """Pre-check: Ensure DNS record is GONE before starting."""
+    if route53.check_dns_record(route53_client, zone_id, record_name):
+        logger.warning(f"⚠️ Stale record {record_name} found. Force cleaning...")
+        route53.cleanup_record(route53_client, zone_id, record_name)
+        if not route53.wait_for_dns_deletion(route53_client, zone_id, record_name, timeout=60):
+            raise RuntimeError(f"Unable to clean environment for {record_name}")
+
+def run_test_suite(source_name, manifest_path, k8s_clients, route53_client, zone_id, external_mode):
     """
-    Forcefully deletes A-Record and prefixed TXT records.
-    Uses precise exception handling to avoid masking real permission issues.
+    Runs a single test case (e.g., Service).
+    1. Pre-check (Clean Slate)
+    2. Deploy K8s Resource
+    3. Verify DNS Creation
+    4. Verify DNS Deletion
     """
-    main_target = dns_name if dns_name.endswith(".") else f"{dns_name}."
-    txt_target = f"cname-{main_target}"
+    source_host_name = f"{source_name}.{config.TEST_BASE_HOSTNAME}"
     
-    targets_to_check = [main_target, txt_target]
-    changes = []
+    logger.info(f"--- STARTING TEST: {source_name} ---")
+    
+    # 1. Clean Slate
+    ensure_clean_state(route53_client, zone_id, source_host_name)
 
-    logger.info(f"🧹 FORCE CLEANUP: Checking for {targets_to_check}...")
-
-    try:
-        # Step 1: Find records (List operations rarely throw exceptions, usually just empty lists)
-        for target in targets_to_check:
-            try:
-                response = route53_client.list_resource_record_sets(
-                    HostedZoneId=zone_id, 
-                    StartRecordName=target, 
-                    MaxItems="1"
-                )
-                for r in response.get("ResourceRecordSets", []):
-                    # Strict Exact Match Check
-                    if r["Name"] == target and r["Type"] in ["A", "TXT", "CNAME"]:
-                        logger.info(f"   - Found Stale Record: {r['Name']} ({r['Type']})")
-                        changes.append({"Action": "DELETE", "ResourceRecordSet": r})
-            
-            except ClientError as e:
-                # Handle specific read errors (like Zone Not Found)
-                code = e.response['Error']['Code']
-                if code == 'NoSuchHostedZone':
-                    logger.error(f"   - Zone {zone_id} does not exist. Skipping cleanup.")
-                    return
-                elif code == 'AccessDenied':
-                    logger.error("   - ❌ ACCESS DENIED: IAM Role cannot list Route53 records.")
-                    raise # Re-raise because this is a configuration failure
-                else:
-                    logger.warning(f"   - Error listing records: {e}")
-
-        # Step 2: Delete records
-        if changes:
-            logger.info(f"   - Deleting {len(changes)} records...")
-            try:
-                route53_client.change_resource_record_sets(
-                    HostedZoneId=zone_id, 
-                    ChangeBatch={"Changes": changes}
-                )
-                logger.info("   - Route53 Cleaned.")
-            
-            except ClientError as e:
-                code = e.response['Error']['Code']
-                # Race Condition: ExternalDNS might have deleted it milliseconds ago
-                if code == 'InvalidChangeBatch':
-                    logger.info("   - Cleanup skipped: Record was already deleted (Race Condition).")
-                else:
-                    logger.error(f"   - Failed to delete records: {e}")
-        else:
-            logger.info("   - No stale records found.")
-
-    except Exception as e:
-        # We still keep a generic catch-all at the very top level just to prevent 
-        # the cleanup routine from crashing the whole script, but we log it as a bug.
-        logger.error(f"   - Unexpected error during Route53 cleanup: {e}")
+    # 2. Deploy
+    test_ctx = {
+        "TEST_NAMESPACE": config.TEST_NAMESPACE,
+        "TEST_HOSTNAME": source_host_name
+    }
+    
+    with k8s.resource_manager(k8s_clients, manifest_path, test_ctx) as _:
+        # 3. Verify Creation
+        logger.info(f"Waiting for DNS propagation: {source_host_name}")
+        # Note: Ensure wait_for_dns_propagation swallows transient AWS errors!
+        if not route53.wait_for_dns_propagation(route53_client, zone_id, source_host_name):
+            raise RuntimeError(f"DNS Propagation timed out for {source_name}")
+        
+    # 4. Verify Deletion (After Context Manager exits)
+    if external_mode == "sync":
+        logger.info(f"Verifying auto-deletion for {source_host_name}...")
+        if not route53.wait_for_dns_deletion(route53_client, zone_id, source_host_name):
+            raise RuntimeError(f"DNS Deletion verification failed for {source_name}")
+    
+    # 5. Final Safety Cleanup (Just in case)
+    route53.cleanup_record(route53_client, zone_id, source_host_name)
+    logger.info(f"--- TEST PASSED: {source_name} ---")

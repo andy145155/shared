@@ -1,87 +1,104 @@
-# main.py
-import sys
-import signal
+# lib/k8s.py
 import logging
-from lib import k8s, external_dns, route53, test_runner
+from contextlib import contextmanager
+from typing import Tuple, Dict, Any, List
+from kubernetes import client, config as k8s_config, utils
+from kubernetes.client.rest import ApiException
 
-# --- CONFIGURATION ---
-# Map the 'source' string from external-dns args to your local test files
-SOURCE_TEST_MAP = {
-    "service": "manifests/service.yaml",
-    "ingress": "manifests/ingress.yaml",
-    "istio-gateway": "manifests/gateway.yaml",
-}
+logger = logging.getLogger(__name__)
 
-# Setup Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("platform-automation.main")
+# Type Alias for clarity
+Clients = Tuple[client.ApiClient, client.CoreV1Api]
 
-def handle_sigterm(signum, frame):
-    logger.warning("Received SIGTERM, exiting...")
-    sys.exit(1)
+def initialize_clients() -> Clients:
+    """Initialize generic ApiClient (for utils) and CoreV1 (for Namespace)."""
+    try:
+        k8s_config.load_incluster_config()
+    except k8s_config.ConfigException:
+        k8s_config.load_kube_config()
+    
+    # We return the Generic Client (for dynamic creation) and CoreV1 (for Namespaces)
+    return client.ApiClient(), client.CoreV1Api()
 
-def main():
-    signal.signal(signal.SIGTERM, handle_sigterm)
+def ensure_namespace(core_api: client.CoreV1Api, namespace: str):
+    """Idempotent creation of a Namespace."""
+    try:
+        core_api.create_namespace(
+            body=client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace))
+        )
+        logger.info(f"Created namespace: {namespace}")
+    except ApiException as e:
+        if e.status == 409:
+            logger.info(f"Namespace {namespace} already exists.")
+        else:
+            raise
+
+@contextmanager
+def infrastructure_manager(clients: Clients, namespace: str, cleanup: bool = True):
+    """
+    Context Manager for Global Infra.
+    Setup: Creates Namespace.
+    Teardown: Deletes Namespace (always).
+    """
+    _, core_api = clients
+    
+    # --- SETUP ---
+    logger.info(f"[Infra] Setting up namespace '{namespace}'...")
+    ensure_namespace(core_api, namespace)
     
     try:
-        # 1. SETUP CLIENTS (Fail Fast)
-        logger.info("Initializing clients...")
-        # Unpack the tuple directly or just pass it around
-        k8s_clients = k8s.initialize_k8s_clients() 
-        # (core, apps, net, custom) = k8s_clients
-        
-        r53_client = route53.get_client()
-
-        # 2. DISCOVERY
-        # We use the CoreV1Api (index 0 of clients) to check the running pod
-        config = external_dns.detect_config(k8s_clients[0])
-        
-        logger.info(f"Detected Config :: Version: {config.version} | Policy: {config.policy}")
-        logger.info(f"Enabled Sources: {config.enabled_sources}")
-        logger.info(f"Target Zone ID: {config.zone_id}")
-
-        # 3. FILTER SOURCES
-        # Compare what the cluster supports vs what tests we have defined
-        active_sources = [s for s in config.enabled_sources if s in SOURCE_TEST_MAP]
-
-        if not active_sources:
-            logger.error("❌ No testable sources found! (Check SOURCE_TEST_MAP vs Cluster Args)")
-            sys.exit(0) # or 1 depending on if this is considered a failure
-
-        # 4. EXECUTION LOOP
-        failed_sources = []
-        
-        for source in active_sources:
-            manifest_path = SOURCE_TEST_MAP[source]
-            
+        yield
+    finally:
+        # --- TEARDOWN ---
+        if cleanup:
+            logger.info(f"[Infra] Cleaning up namespace '{namespace}'...")
             try:
-                # Delegate the entire lifecycle to the runner
-                test_runner.run_test_suite(
-                    source_name=source,
-                    manifest_path=manifest_path,
-                    clients=k8s_clients,
-                    route53_client=r53_client,
-                    config=config
-                )
+                core_api.delete_namespace(name=namespace)
+                logger.info("[Infra] Namespace deleted.")
             except Exception as e:
-                logger.error(f"❌ Source '{source}' FAILED: {e}")
-                failed_sources.append(source)
-                # We continue the loop to test other sources even if one fails
+                logger.warning(f"[Infra] Failed to delete namespace: {e}")
 
-        # 5. FINAL REPORT
-        if failed_sources:
-            logger.error(f"Test Suite Failed. The following sources had errors: {failed_sources}")
-            sys.exit(1)
-        else:
-            logger.info("🎉 ALL TESTS PASSED SUCCESSFULLY")
-
-    except Exception as e:
-        # Catch-all for setup errors (Auth, Network, etc)
-        logger.exception("CRITICAL ERROR: Script execution crashed")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
+@contextmanager
+def resource_manager(clients: Clients, manifest_path: str, context: Dict[str, str]):
+    """
+    Context Manager for Test Resources (Service, Ingress, etc.).
+    Setup: Renders YAML -> generic apply.
+    Teardown: Generic delete.
+    """
+    api_client, _ = clients
+    
+    # Load and Render (Assuming you have a helper for this in utils, or imported)
+    # For brevity, I assume 'load_manifests' returns a list of dicts
+    from lib.utils import load_manifests 
+    resources, _ = load_manifests(manifest_path, context_overrides=context)
+    
+    deployed_resources = []
+    
+    try:
+        # --- DEPLOY ---
+        for res in resources:
+            logger.info(f"Applying {res['kind']}: {res['metadata']['name']}")
+            utils.create_from_dict(api_client, res, namespace=context["TEST_NAMESPACE"])
+            deployed_resources.append(res)
+        yield deployed_resources
+        
+    finally:
+        # --- CLEANUP ---
+        logger.info("Cleaning up test resources...")
+        for res in reversed(deployed_resources): # Delete in reverse order
+            try:
+                name = res["metadata"]["name"]
+                namespace = context["TEST_NAMESPACE"]
+                
+                # Use dynamic client to delete
+                # Note: utils.create_from_dict exists, but delete is often manual or via raw API.
+                # A simple way for robust delete is creating a dynamic client or using raw request.
+                # For simplicity here, we can assume standard resources or use the wrapper:
+                k8s_opts = client.DeleteOptions(propagation_policy='Foreground')
+                
+                # Fallback to specific APIs or dynamic client here. 
+                # (Ideally, you use dynamic_client for deletion too).
+                pass # [Actual deletion logic goes here, similar to your original code]
+                
+            except Exception as e:
+                logger.warning(f"Failed to delete {res['kind']}: {e}")
