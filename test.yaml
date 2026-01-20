@@ -1,31 +1,45 @@
-# 1. Define the ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: namespace-manager
+  name: ephemeral-env-manager
 rules:
-# Rule A: Allow deleting/getting ONLY the specific namespace
-- apiGroups: [""]
-  resources: ["namespaces"]
-  verbs: ["delete", "get"]
-  resourceNames: ["target-namespace-name"] # <--- "resourceNames" works perfectly for DELETE
+  # ---------------------------------------------------------
+  # RULE 1: STRICT DELETE (The Security Guard)
+  # Restricts "destroy" power to ONLY the specific namespace.
+  # ---------------------------------------------------------
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["delete", "get"]
+    resourceNames: ["verification-external-dns"] # <--- CRITICAL SECURITY LOCK
 
-# Rule B: Allow creating namespaces (Must be global)
-- apiGroups: [""]
-  resources: ["namespaces"]
-  verbs: ["create"] # <--- Cannot use "resourceNames" here. This allows creating ANY namespace.
+  # ---------------------------------------------------------
+  # RULE 2: GLOBAL CREATE (The Necessary Evil)
+  # K8s RBAC cannot restrict "create" by name. 
+  # This allows creating ANY namespace, but Rule 1 limits cleanup.
+  # ---------------------------------------------------------
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create"] 
 
----
-# 2. Bind it to your ServiceAccount (Same as before)
+  # ---------------------------------------------------------
+  # RULE 3: BOOTSTRAP PERMISSION (The Self-Binder)
+  # Allows the job to grant ITSELF admin rights inside the new namespace.
+  # This allows "kubectl create rolebinding" to run successfully.
+  # ---------------------------------------------------------
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["create"]
+
+
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: allow-manage-specific-ns
+  name: external-dns-ephemeral-access
 subjects:
-- kind: ServiceAccount
-  name: my-service-account
-  namespace: management-ns
+  - kind: ServiceAccount
+    name: external-dns      # Your existing SA
+    namespace: external-dns # Where the SA lives
 roleRef:
   kind: ClusterRole
-  name: namespace-manager
+  name: ephemeral-env-manager
   apiGroup: rbac.authorization.k8s.io
