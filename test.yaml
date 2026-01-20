@@ -1,44 +1,105 @@
+# =============================================================================
+# 1. THE IDENTITY
+# The permanent ServiceAccount used by the Job/Script.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: external-dns
+  namespace: external-dns
+
+---
+# =============================================================================
+# 2. THE BLUEPRINT (Worker Rules)
+# This ClusterRole defines the "Worker" permissions.
+# NOTE: This does NOT grant permission to anyone yet. It is just a definition.
+#       The script will bind this to itself strictly inside the verification NS.
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: verification-job-rules
+rules:
+  # STRICT MODE: Write-Only Access
+  # We intentionally omit "get", "list", "patch", "update" to minimize risk.
+  # The script must "blindly" create and delete resources.
+  
+  # Network Resources
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "delete"] 
+  
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "delete"]
+  
+  # Istio Resources
+  - apiGroups: ["networking.istio.io"]
+    resources: ["gateways", "virtualservices"]
+    verbs: ["create", "delete"]
+
+---
+# =============================================================================
+# 3. THE MANAGER (Supervisor Rules)
+# This ClusterRole gives the ServiceAccount the ability to manage the
+# lifecycle of the ephemeral environment (Create NS -> Bootstrap -> Delete NS).
+# =============================================================================
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: ephemeral-env-manager
 rules:
   # ---------------------------------------------------------
-  # RULE 1: STRICT DELETE (The Security Guard)
-  # Restricts "destroy" power to ONLY the specific namespace.
+  # A. Namespace Lifecycle
   # ---------------------------------------------------------
+  # SECURITY: Limit "destroy" power to ONLY the specific namespace.
+  # This prevents the script from accidentally deleting 'production' or 'default'.
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["delete", "get"]
-    resourceNames: ["verification-external-dns"] # <--- CRITICAL SECURITY LOCK
+    resourceNames: ["verification-external-dns"] 
 
-  # ---------------------------------------------------------
-  # RULE 2: GLOBAL CREATE (The Necessary Evil)
-  # K8s RBAC cannot restrict "create" by name. 
-  # This allows creating ANY namespace, but Rule 1 limits cleanup.
-  # ---------------------------------------------------------
+  # NECESSARY EVIL: K8s RBAC cannot restrict "create" by name.
+  # This technically allows creating ANY namespace, but Rule A limits 
+  # what the script can delete/manage afterwards.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["create"] 
+    verbs: ["create"]
 
   # ---------------------------------------------------------
-  # RULE 3: BOOTSTRAP PERMISSION (The Self-Binder)
-  # Allows the job to grant ITSELF admin rights inside the new namespace.
-  # This allows "kubectl create rolebinding" to run successfully.
+  # B. Bootstrapping (Self-Binding)
   # ---------------------------------------------------------
+  # Allows the script to create a RoleBinding inside the new namespace.
+  # This is the "container" that holds the permissions.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings"]
     verbs: ["create"]
 
+  # ---------------------------------------------------------
+  # C. Privilege Escalation Control (The "Bind" Rule)
+  # ---------------------------------------------------------
+  # SECURITY CRITICAL: This allows the ServiceAccount to hand out the 
+  # 'verification-job-rules' key, even though it doesn't hold that key itself.
+  # We restrict this to ONLY the specific ClusterRole defined above.
+  # It cannot grant 'admin' or 'cluster-admin' to itself.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["bind"]
+    resourceNames: ["verification-job-rules"]
 
+---
+# =============================================================================
+# 4. THE ASSIGNMENT
+# Grants the "Manager" powers to the ServiceAccount globally.
+# =============================================================================
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: external-dns-ephemeral-access
+  name: external-dns-ephemeral-manager
 subjects:
   - kind: ServiceAccount
-    name: external-dns      # Your existing SA
-    namespace: external-dns # Where the SA lives
+    name: external-dns
+    namespace: external-dns
 roleRef:
   kind: ClusterRole
   name: ephemeral-env-manager
