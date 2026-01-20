@@ -1,63 +1,79 @@
-from kubernetes import client
+from kubernetes import client, config, utils
 from kubernetes.client.rest import ApiException
-import logging
 
-logger = logging.getLogger(__name__)
+# Load in-cluster config (uses the ServiceAccount token automatically)
+config.load_incluster_config()
 
-def ensure_namespace(core_api: client.CoreV1Api, namespace_name: str):
-    """
-    Creates a Namespace if it doesn't exist.
-    Idempotent: Returns successfully if the namespace is already there.
-    """
-    # Define the Namespace object using the Python class
-    ns_body = client.V1Namespace(
-        metadata=client.V1ObjectMeta(name=namespace_name)
-    )
+v1 = client.CoreV1Api()
+rbac_v1 = client.RbacAuthorizationV1Api()
 
+VERIFICATION_NS = "verification-external-dns"
+SA_NAME = "external-dns"
+SA_NAMESPACE = "external-dns"
+
+def create_ephemeral_env():
+    # 1. Create the Namespace
+    print(f"Creating namespace: {VERIFICATION_NS}...")
+    ns_body = client.V1Namespace(metadata=client.V1ObjectMeta(name=VERIFICATION_NS))
     try:
-        core_api.create_namespace(body=ns_body)
-        logger.info(f"Created namespace: {namespace_name}")
+        v1.create_namespace(body=ns_body)
     except ApiException as e:
-        if e.status == 409: # HTTP 409: Conflict (Already Exists)
-            logger.info(f"Namespace '{namespace_name}' already exists. Proceeding.")
+        if e.status == 409:
+            print("Namespace already exists, proceeding...")
         else:
-            # Re-raise unexpected errors (e.g., Auth failure, Network issue)
-            logger.error(f"Failed to create namespace {namespace_name}: {e}")
             raise
 
-
-
-            # lib/utils.py
-
-def ensure_clean_state(route53_client, zone_id, record_name: str):
-    """
-    Pre-condition check: 
-    Verifies that the target DNS record does NOT exist.
-    If it exists, it forces a cleanup and waits for deletion.
-    """
-    logger.info(f"Pre-check: Verifying clean slate for {record_name}...")
-
-    # 1. Check if it exists
-    if route53.check_dns_record(route53_client, zone_id, record_name):
-        logger.warning(f"⚠️ Stale record found for {record_name}. Cleaning it up before testing...")
-        
-        # 2. Force delete
-        route53.cleanup_record(route53_client, zone_id, record_name)
-        
-        # 3. Wait for it to disappear
-        is_gone = route53.wait_for_dns_deletion(
-            route53_client, 
-            zone_id, 
-            record_name, 
-            timeout=60 # Shorter timeout for pre-check
+    # 2. BOOTSTRAP: Self-Bind Admin rights inside the new namespace
+    # This uses the 'create rolebindings' permission we gave in the ClusterRole
+    print("Bootstrapping Admin permissions...")
+    binding = client.V1RoleBinding(
+        metadata=client.V1ObjectMeta(name="verification-admin", namespace=VERIFICATION_NS),
+        subjects=[client.V1Subject(
+            kind="ServiceAccount",
+            name=SA_NAME,
+            namespace=SA_NAMESPACE
+        )],
+        role_ref=client.V1RoleRef(
+            kind="ClusterRole",
+            name="admin", # We use the built-in K8s admin role
+            api_group="rbac.authorization.k8s.io"
         )
-        
-        if not is_gone:
-            raise RuntimeError(
-                f"❌ CRITICAL: Cannot clean environment. Record {record_name} is stuck. "
-                "Aborting test to prevent false results."
-            )
-        
-        logger.info("✅ Environment cleaned. Proceeding with test.")
-    else:
-        logger.info("✅ Environment is clean.")
+    )
+    try:
+        rbac_v1.create_namespaced_role_binding(namespace=VERIFICATION_NS, body=binding)
+        print("Admin access granted successfully.")
+    except ApiException as e:
+        if e.status == 409:
+            print("Binding already exists.")
+        else:
+            raise
+
+def check_main_pods():
+    # 3. List Pods in the Home Namespace
+    # This uses the 'pod-reader' Role we created
+    print(f"Checking pods in {SA_NAMESPACE}...")
+    pods = v1.list_namespaced_pod(SA_NAMESPACE)
+    for pod in pods.items:
+        print(f"Found pod: {pod.metadata.name} ({pod.status.phase})")
+
+def cleanup():
+    # 4. Delete the Namespace
+    # This uses the restricted 'delete' permission in the ClusterRole
+    print(f"Deleting namespace {VERIFICATION_NS}...")
+    try:
+        v1.delete_namespace(name=VERIFICATION_NS)
+        print("Namespace deleted.")
+    except ApiException as e:
+        print(f"Error deleting namespace: {e}")
+
+# --- Execution Flow ---
+try:
+    create_ephemeral_env()
+    check_main_pods()
+    
+    # ... Run your Ingress/Gateway creation logic here ...
+    # utils.create_from_yaml(k8s_client, "ingress.yaml", namespace=VERIFICATION_NS)
+    
+finally:
+    # Always clean up, even if tests fail
+    cleanup()
