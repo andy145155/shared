@@ -1,51 +1,93 @@
-import logging
-from lib import k8s, route53, config
+Yes, you absolutely can (and for a test suite, you often *should*) recreate the namespace to guarantee a perfectly clean environment.
 
-logger = logging.getLogger(__name__)
+The main challenge is that Kubernetes namespace deletion is **asynchronous**. When you delete a namespace, it enters a `Terminating` phase while the cluster cleans up resources. You cannot create a new namespace with the same name until the old one is completely 404 (Gone).
 
-def run_test_suite(source_name, manifest_path, k8s_clients, route53_client, zone_id, external_mode, test_namespace):
+Here is the updated `infrastructure_manager` for **`lib/k8s.py`** that handles this "Delete, Wait, Recreate" logic robustly.
+
+### Updated `lib/k8s.py`
+
+You will need to import `time` at the top of the file.
+
+```python
+import time # <--- Don't forget this import
+# ... existing imports ...
+
+@contextmanager
+def infrastructure_manager(clients: Clients, namespace: str, cleanup: bool = True):
     """
-    Runs a single test case.
-    Note: We DO NOT delete K8s resources here. 
-    They accumulate in the namespace until the namespace itself is deleted at the end.
+    Context Manager for Global Infra.
+    Setup: Forces a FRESH Namespace (Deletes old one if exists, waits, creates new).
+    Teardown: Deletes Namespace.
     """
-    source_host_name = f"{source_name}.{config.TEST_BASE_HOSTNAME}"
+    _, core_api = clients
     
-    # 1. Pre-Check (Clean Slate for DNS)
-    if route53.check_dns_record(route53_client, zone_id, source_host_name):
-        logger.warning(f"Stale record {source_host_name} found. Cleaning...")
-        route53.cleanup_record(route53_client, zone_id, source_host_name)
-        route53.wait_for_dns_deletion(route53_client, zone_id, source_host_name)
-
-    # 2. Deploy Resources (Fire and Forget)
-    test_ctx = {
-        "TEST_NAMESPACE": test_namespace,
-        "TEST_HOSTNAME": source_host_name
-    }
+    # --- SETUP PHASE ---
+    logger.info(f"[Setup] Preparing fresh namespace '{namespace}'...")
     
-    # Just create them. No context manager needed here.
-    k8s.deploy_resources(k8s_clients, manifest_path, test_ctx)
-
-    # 3. Verify DNS Creation
-    logger.info(f"Waiting for DNS propagation: {source_host_name}")
-    if not route53.wait_for_dns_propagation(route53_client, zone_id, source_host_name):
-        raise RuntimeError(f"DNS Propagation timed out for {source_name}")
+    try:
+        # Try to create directly
+        core_api.create_namespace(
+            body=client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace))
+        )
+        logger.info(f"Created namespace: {namespace}")
         
-    # 4. Verify Auto-Deletion (Optional Logic)
-    # If we want to verify that deleting the Ingress deletes the DNS, 
-    # we would need to manually delete the resource here. 
-    # BUT, if you just want to test "Can I create records?", you can skip this.
-    
-    # If you DO want to test deletion behavior, you must manually delete the specific resource here:
-    if external_mode == "sync":
-         # ... find and delete the specific ingress/service ...
-         # ... wait for dns deletion ...
-         pass
+    except ApiException as e:
+        if e.status == 409:
+            # IT EXISTS! We must nuke it and wait.
+            logger.warning(f"Namespace {namespace} exists. Recreating for clean state...")
+            
+            # 1. Trigger Deletion
+            try:
+                core_api.delete_namespace(name=namespace)
+            except ApiException as del_e:
+                # Ignore if it's already deleted (404) or conflicting (409)
+                if del_e.status not in [404, 409]:
+                    raise
 
-    # 5. Final DNS Cleanup (To save money/clutter)
-    # Even though K8s resources die with the namespace, Route53 records might stay 
-    # if ExternalDNS doesn't clean them fast enough before the Pod dies.
-    # It's good practice to ensure Route53 is clean.
-    route53.cleanup_record(route53_client, zone_id, source_host_name)
-    
-    logger.info(f"--- TEST PASSED: {source_name} ---")
+            # 2. Wait for it to disappear (Blocking Loop)
+            logger.info(f"Waiting for old namespace {namespace} to terminate...")
+            timeout = 120 # 2 minutes max
+            start_time = time.time()
+            
+            while True:
+                try:
+                    core_api.read_namespace(name=namespace)
+                    # If we are here, it still exists. Check timeout.
+                    if time.time() - start_time > timeout:
+                        raise TimeoutError(f"Namespace {namespace} stuck in Terminating state for > {timeout}s")
+                    time.sleep(2)
+                except ApiException as get_e:
+                    if get_e.status == 404:
+                        # Success! It is gone.
+                        break 
+                    # If it's another error (e.g. 500, 403), raise it.
+                    raise
+
+            # 3. Create the new one
+            logger.info(f"Old namespace gone. Creating fresh namespace: {namespace}")
+            core_api.create_namespace(
+                body=client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace))
+            )
+        else:
+            # Raise any other error (Auth, Network, etc)
+            raise
+
+    try:
+        yield
+    finally:
+        # --- TEARDOWN PHASE ---
+        if cleanup:
+            logger.info(f"[Cleanup] Deleting namespace '{namespace}'...")
+            try:
+                core_api.delete_namespace(name=namespace)
+                logger.info("[Cleanup] Namespace deletion triggered.")
+            except ApiException as e:
+                # If it's already gone (404), that's fine.
+                if e.status != 404:
+                    logger.warning(f"[Cleanup] Failed to delete namespace: {e}")
+
+```
+
+### Why the "Wait Loop" is critical
+
+If you simply issue `delete_namespace` and immediately try `create_namespace`, Kubernetes will reject the creation request with a `409 Conflict` error because the old namespace is technically still there (marked as `Terminating`). You **must** poll until you get a `404 Not Found` before creating the new one.
