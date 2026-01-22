@@ -1,128 +1,30 @@
-Here is a professional, production-ready `README.md` for your project.
+Here is a clean, simplified **Kubernetes RBAC** section for your README.
 
-I have structured it to cover **Setup, Usage, and Architecture**, making it easy for your team (or future you) to onboard.
+Instead of pasting large blocks of YAML, this table summarizes *what* the script creates and *why* it needs those permissions. It highlights the security model (bootstrapping) we discussed.
 
 ---
 
-# External-DNS Verification Automation
+## 🔐 Kubernetes RBAC
 
-A robust automated verification suite designed to validate the end-to-end integration between **Kubernetes**, **ExternalDNS**, and **AWS Route53**.
+This tool operates on a **Least Privilege** model. It does not run with admin privileges. Instead, it uses a "Bootstrapper" pattern: the job starts with just enough permission to create a sandbox, then grants itself testing rules *only* within that sandbox.
 
-This script performs "Black Box" testing by deploying real Kubernetes resources (Service, Ingress, Istio Gateway) and verifying that the corresponding DNS records are correctly propagated to—and subsequently removed from—AWS Route53.
+### Required Permissions
 
-## 🚀 Features
+The `ServiceAccount` running this job requires the following rules:
 
-* **Smart Detection:** Automatically detects the running configuration of `external-dns` (e.g., source types, `upsert-only` mode, ownership registry) by inspecting the live Pod.
-* **Idempotency:** Safe to run repeatedly. Includes robust cleanup logic to prevent "zombie" resources in K8s or Route53.
-* **Fail-Safe:** Handles `SIGTERM` signals for graceful shutdown in Kubernetes/ArgoCD environments.
-* **Modular Architecture:** Separation of concerns between Kubernetes logic, AWS interactions, and test orchestration.
-
-## 📋 Prerequisites
-
-* **Python 3.11+**
-* **Kubernetes Cluster** with `external-dns` installed.
-* **AWS Credentials** with Route53 write permissions.
-
-### Required IAM Permissions
-
-The script requires the following AWS IAM actions on the target Hosted Zone:
-
-* `route53:ListHostedZones`
-* `route53:ListResourceRecordSets`
-* `route53:ChangeResourceRecordSets`
-* `route53:GetChange`
-
-## 🛠️ Configuration
-
-The script is configured via Environment Variables.
-
-| Variable | Description | Required | Default |
+| Scope | Resources | Verbs | Reason |
 | --- | --- | --- | --- |
-| `HOSTED_ZONE_NAME` | The domain name of the AWS Hosted Zone (e.g., `example.com.`) | **Yes** | - |
-| `TEST_IMAGE` | Docker image to use for the dummy test pods | **Yes** | - |
-| `EXTERNAL_DNS_EXPECTED_VERSION` | version of external-dns to verify against (e.g. `v0.13.5`) | **Yes** | - |
-| `TEST_NAMESPACE` | K8s namespace where test resources will be deployed | No | `verification-external-dns` |
-| `AWS_REGION` | AWS Region for Route53 calls | No | `ap-east-1` |
+| **Discovery** | `pods` | `get`, `list` | To find the running `external-dns` pod and inspect its CLI arguments. |
+| **Lifecycle** | `namespaces` | `create`, `delete`, `get` | To create and destroy the ephemeral `verification-external-dns-...` namespace. |
+| **Security** | `clusterroles` | `bind` | To bind the **Test Rules** (see below) to the ephemeral namespace. |
+| **Security** | `rolebindings` | `create` | To create the binding inside the ephemeral namespace. |
 
-## 📦 Installation & Usage
+### Test Rules (Ephemeral)
 
-### 1. Local Development
+Once the temporary namespace is created, the script binds a restricted ClusterRole (`verification-rules`) that allows creating test resources. These permissions are **strictly scoped** to the temporary namespace:
 
-We recommend using [uv](https://github.com/astral-sh/uv) or `pip` for dependency management.
+* **Services:** `create`, `delete`
+* **Ingresses:** `create`, `delete`
+* **Istio Gateways:** `create`, `delete`
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Export required variables
-export HOSTED_ZONE_NAME="dev.example.com."
-export TEST_IMAGE="nginx:alpine"
-export EXTERNAL_DNS_EXPECTED_VERSION="v0.14.0"
-
-# Run the verification
-python3 main.py
-
-```
-
-### 2. Running as a Kubernetes Job (or ArgoCD Hook)
-
-This script is designed to run as a **Post-Sync Hook** in ArgoCD to verify deployments automatically.
-
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: verify-external-dns
-  annotations:
-    argocd.argoproj.io/hook: PostSync
-spec:
-  template:
-    spec:
-      serviceAccountName: verification-sa # Needs RBAC to create Service/Ingress
-      containers:
-        - name: verifier
-          image: <your-repo>/external-dns-verifier:latest
-          envFrom:
-            - configMapRef:
-                name: verifier-config
-
-```
-
-## 🧠 How It Works
-
-The script follows a **Setup → Verify → Cleanup** lifecycle for each test case (Service, Ingress, Gateway):
-
-1. **Environment Check:** Validates K8s connectivity and AWS credentials.
-2. **Discovery:** Inspects the active `external-dns` Pod to determine which sources are enabled (e.g., checks if `--source=istio-gateway` is active).
-3. **Deployment:** Creates a temporary K8s resource (e.g., a Service with annotation `external-dns.alpha.kubernetes.io/hostname`).
-4. **Propagation Check:** Polls AWS Route53 API until the TXT and A records appear.
-5. **Teardown:** Deletes the K8s resource.
-6. **Cleanup Verification:** Polls AWS Route53 to ensure records are removed (unless `upsert-only` mode is detected).
-
-## 📂 Project Structure
-
-```text
-.
-├── main.py                 # Entry point (Controller)
-├── lib/
-│   ├── config.py           # Configuration & Env Var validation
-│   ├── k8s.py              # Kubernetes Client & Resource Management
-│   ├── route53.py          # AWS Boto3 logic & Pagination
-│   ├── external_dns.py     # Logic to inspect the running external-dns installation
-│   └── utils.py            # Test runners and Orchestration logic
-├── manifests/              # YAML templates for test resources
-│   ├── service.yaml
-│   ├── ingress.yaml
-│   └── gateway.yaml
-└── requirements.txt        # Python dependencies
-
-```
-
-## 🤝 Contributing
-
-1. Ensure all new logic is added to the relevant module in `lib/`.
-2. Run linting before committing:
-```bash
-ruff check .
-
-```
+> **Note:** The script cannot create or delete resources in any other namespace (e.g., `default`, `kube-system`).
