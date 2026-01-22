@@ -1,134 +1,74 @@
-This template is designed to be flexible. I've used `[...]` for placeholders and marked sections that should be deleted if they aren't relevant (like ArgoCD hooks for a local-only script).
+You are absolutely right. The current "Key Features" and "Execution Steps/How It Works" are repeating the same information (like "Smart Detection" appearing in both).
 
-I added the **Troubleshooting** and **Useful Links** sections as requested, and refined the **Execution** section to clearly distinguish between Local vs. Remote (ArgoCD) usage.
+To fix this, we will structure it so:
+
+1. **Key Features** describes the **benefits** (Why use this?).
+2. **How It Works** describes the **process** (What does the script actually do step-by-step?).
+
+Here is the revised, concise version for your README.
+
+### 1. Revised Key Features
+
+*Focus on the "Why" (Capabilities).*
+
+## ✨ Key Features
+
+* **Zero-Config Adaptation:** Automatically inspects the live `external-dns` pod to determine which sources (Service, Ingress, Istio) to test and which policy mode (`sync` vs `upsert-only`) to enforce.
+* **Isolated Execution:** Runs entirely within an ephemeral namespace (`verification-external-dns-...`) that is destroyed after testing, ensuring no interference with production workloads.
+* **CI/CD Ready:** Returns standard exit codes (0 or 1) and handles `SIGTERM` gracefully, making it perfect for ArgoCD PostSync hooks.
 
 ---
 
-# `README.md` Template
+### 2. Revised How It Works
 
-*(Copy the content below into your project's `README.md` and replace the bracketed text `[...]`)*
-
-```markdown
-# [Script Name / Tool Name]
-
-> [Brief, one-sentence description of what this automation does. E.g., "Automated verification suite for ExternalDNS releases running on ArgoCD."]
-
-## 📖 Overview
-[Provide a short paragraph explaining the problem this script solves. Who is the user? Is it run manually or via CI/CD?]
-
-**Key Capabilities:**
-* [Feature 1: e.g., Detects running configuration automatically]
-* [Feature 2: e.g., Cleans up resources after failure]
-* [Feature 3: e.g., Supports multiple verify targets]
+*Focus on the "How" (The Lifecycle). This text replaces your "Execution Steps" list entirely.*
 
 ## 🧠 How It Works
-[Briefly describe the architectural flow. Bullet points or a simple text diagram work best.]
 
-The script follows this execution lifecycle:
-1.  **Discovery:** [e.g., Checks the k8s cluster for the active deployment.]
-2.  **Execution:** [e.g., Deploys a dummy service and polls Route53.]
-3.  **Verification:** [e.g., Validates that records exist in AWS.]
-4.  **Teardown:** [e.g., Removes all test resources.]
+The script follows a strictly sequential lifecycle to verify the DNS loop:
 
-## 🛠️ Configuration
-The application is configured entirely via Environment Variables.
-
-| Variable | Description | Required | Default |
-| :--- | :--- | :--- | :--- |
-| `TARGET_ENV` | The target environment (dev/staging/prod) | **Yes** | - |
-| `AWS_REGION` | AWS Region for API calls | No | `ap-east-1` |
-| `[VAR_NAME]` | [Description] | [Yes/No] | [Value] |
-
-## 🔗 Useful Links
-* **Runbook:** [Link to Confluence/Notion Runbook]
-* **Related Repos:**
-    * [Repo Name](https://github.com/...) - [Description]
-* **Docker Image:** [Link to ECR/Artifactory]
-* **Slack Channel:** #[channel-name]
-
-## 🚀 Execution Guide
-
-### 1. Local Development
-We recommend using **`uv`** for Python projects to manage dependencies and execution.
-
-**Prerequisites:**
-* **Language Runtime:** [e.g., Python 3.12+]
-* **Tools:** `kubectl`, `aws-cli`
-* **Access:** Valid AWS credentials and Kubeconfig context.
-
-**How to Run:**
-```bash
-# 1. Create a local .env file (Optional but recommended)
-echo "TARGET_ENV=dev" > .env
-
-# 2. Run the script via uv
-# The --env-file flag automatically loads variables from your .env
-uv run --env-file .env main.py
-
-# OR pass variables inline
-TARGET_ENV=dev uv run main.py
-
-```
-
-### 2. Remote Execution (ArgoCD)
-
-*[Delete this section if this script is local-only]*
-
-This script is designed to run as an **ArgoCD Hook** (e.g., PostSync) to verify deployments automatically.
-
-**Trigger:**
-
-* Runs automatically after a Sync on the `[Application Name]` app.
-* Can be triggered manually via the ArgoCD UI by deleting the `Job`.
-
-**Configuration:**
-The Job manifest is located at: `[Path to Job YAML in repo]`.
-
-## 🔐 Permissions
-
-*[Required for both Local and Remote execution]*
-
-### AWS IAM
-
-The runner requires the following permissions (via IRSA or local credentials):
-
-* **Policy:** `[e.g., AmazonRoute53DomainsFullAccess]`
-* **Specific Actions:**
-* `route53:ChangeResourceRecordSets`
-* `[Other Actions]`
+1. **Discovery:** The script connects to the cluster, identifies the active `external-dns` pod, and learns its configuration.
+2. **Setup:** It creates a temporary Kubernetes namespace with restricted RBAC permissions.
+3. **The Verification Loop:** For each detected source:
+* **Deploy:** Creates a test resource with a unique hostname.
+* **Verify Creation:** Polls Route53 until the record appears.
+* **Verify Deletion:** (If in `sync` mode) Deletes the resource and confirms the record is removed from Route53.
 
 
+4. **Teardown:** The temporary namespace is deleted, instigating an automatic cleanup of all test resources.
 
-### Kubernetes RBAC
+### Logic Flowchart
 
-The runner requires a `Role` or `ClusterRole` with access to:
+```mermaid
+flowchart TD
+    classDef process fill:#e6fffa,stroke:#2c7a7b,stroke-width:2px;
+    classDef decision fill:#fffaf0,stroke:#c05621,stroke-width:2px;
+    classDef fail fill:#fff5f5,stroke:#c53030,stroke-width:2px;
 
-* `[apiGroup/Resource]: [verbs]` (e.g., `networking.k8s.io/ingresses: [create, delete]`)
+    Start([🚀 Start Job]) --> Detect[🔍 Detect Config]
+    Detect --> Setup[🛠 Create Temp Namespace]:::process
 
-## ❓ Troubleshooting
+    Setup --> LoopStart{For Each Source}:::decision
+    
+    subgraph TestLoop [Verification Cycle]
+        LoopStart --> PreClean[Clean Route53 State]
+        PreClean --> Deploy[Deploy Test Resource]
+        Deploy --> CheckCreate{DNS Created?}:::decision
+        
+        CheckCreate -- No --> Fail[❌ Failure Detected]:::fail
+        CheckCreate -- Yes --> ModeCheck{Is 'Sync' Mode?}:::decision
+        
+        ModeCheck -- Yes --> K8sDelete[Delete K8s Resource]
+        K8sDelete --> CheckDelete{DNS Deleted?}:::decision
+        CheckDelete -- No --> Fail
+        CheckDelete -- Yes --> Cleanup
+        
+        ModeCheck -- No (Upsert) --> Cleanup[🧹 Force Route53 Cleanup]
+    end
 
-| Error Message / Symptom | Possible Cause | Solution |
-| --- | --- | --- |
-| `ResourceNotFoundException` | AWS Credentials or Region incorrect | Check `AWS_REGION` and `~/.aws/credentials`. |
-| `Forbidden: User cannot list...` | Missing K8s RBAC role | Verify the Service Account has the correct Role bound. |
-| `Script hangs at Step 2` | Network policy or Security Group blocking API | Check Security Groups for the Pod. |
-
-## 📂 Project Structure
-
-```text
-.
-├── main.py                 # Entry point
-├── lib/                    # Core logic libraries
-├── manifests/              # K8s YAML templates (if applicable)
-├── pyproject.toml          # Python dependencies (managed by uv)
-└── README.md
-
-```
-
----
-
-*[Add any additional sections below as needed, e.g., ## Architecture Diagram, ## Release Process]*
-
-```
+    Cleanup --> LoopStart
+    LoopStart -- Done --> Teardown[🗑 Delete Namespace]:::process
+    Fail --> Teardown
+    Teardown --> End([✅ Exit]):::process
 
 ```
