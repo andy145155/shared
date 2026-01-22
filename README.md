@@ -1,172 +1,71 @@
-Here is the complete, final `README.md` including the Logic Flowchart and the "Disposable Namespace" architecture updates.
+Based on your script logic and your request for a concise, easy-to-read explanation, here is the revised **How It Works** section and an updated **Mermaid flowchart**.
+
+I have simplified the text to focus on the four main actions (Detect, Isolate, Verify, Cleanup) and removed the "Version Mismatch" logic from the flowchart since your code (`external_dns.py`) focuses on detecting configuration arguments rather than version numbers.
+
+### 1. Revised "How It Works" Section
+
+You can replace your current text with this cleaner version:
 
 ---
 
-# ExternalDNS Release Verification
+### 🧠 How It Works
 
-> Automated verification suite that validates end-to-end DNS propagation between Kubernetes and AWS Route53 for ExternalDNS releases.
+This script performs an automated end-to-end test to ensure `external-dns` is working correctly in your cluster.
 
-## 📖 Overview
+1. **Smart Detection:** The script finds your active `external-dns` pod and automatically learns its configuration (e.g., whether it syncs `services` or `ingress`, and if it is in `sync` or `upsert-only` mode).
+2. **Isolated Environment:** It creates a temporary Kubernetes namespace (`verification-external-dns-...`) so tests never interfere with your actual production workloads.
+3. **The Verification Loop:** For each detected source:
+* **Deploy:** Creates a test resource (Service/Ingress) with a unique hostname.
+* **Verify Creation:** Polls AWS Route53 until the DNS records appear.
+* **Verify Deletion:** (If in `sync` mode) Deletes the resource and ensures the DNS records are removed from Route53.
 
-This script performs "Black Box" testing to verify that a deployed version of `external-dns` is functioning correctly. It is designed to run either manually by platform engineers or automatically as a **PostSync Hook** in ArgoCD during release pipelines. It deploys real Kubernetes resources and asserts that the corresponding DNS records are correctly created in and removed from AWS Route53.
 
-**Key Features:**
+4. **Automatic Teardown:** Once finished (or if an error occurs), it automatically deletes the temporary namespace and scrubs any leftover Route53 records.
 
-* **Smart Discovery:** Automatically detects the running configuration (version, sources, `upsert-only` mode, private/public zones) by inspecting the active `external-dns` Pod.
-* **Disposable Sandboxes:** Creates ephemeral, random namespaces for each test case to ensure zero collisions and clean teardowns.
-* **Self-Healing:** Includes "Clean Slate" logic to forcibly remove stale Route53 records before testing to prevent false positives.
+---
 
-## 🧠 How It Works
+### 2. Updated Flowchart (Mermaid)
 
-The script follows a rigorous verification lifecycle for each supported source (Service, Ingress, Gateway).
+This flowchart accurately matches your `verification_runner.py` logic. It shows the automatic config detection, the loop through sources, and the specific check for "Sync vs. Upsert" mode.
 
 ```mermaid
-graph TD
-    A[Start Verification] --> B{Discovery Phase}
-    B -->|Found external-dns Pod| C[Detect Version & Args]
+flowchart TD
+    classDef success fill:#e6fffa,stroke:#2c7a7b,stroke-width:2px;
+    classDef fail fill:#fff5f5,stroke:#c53030,stroke-width:2px;
+    classDef process fill:#ebf8ff,stroke:#2b6cb0,stroke-width:1px;
+
+    Start([Start Verification]) --> Detect[🔍 Detect ExternalDNS Config]
     
-    C --> D{Clean Slate Check}
-    D -->|Record Exists| E[Force Delete Route53 Record]
-    D -->|Record Gone| F[Isolation Phase]
-    E --> F
+    Detect -- No Pod Found --> FailInit[FAIL: No Running Pods]:::fail
+    Detect -- Success --> Setup[🛠 Create Temp Namespace]:::process
+
+    Setup --> LoopStart{For Each Source}
     
-    F --> G[Create Ephemeral Namespace]
-    G --> H[Deploy Test Resource]
-    
-    H --> I{Verification Phase}
-    I -->|Poll Route53| J{Record Created?}
-    J -- No (Timeout) --> K[Mark Failed]
-    J -- Yes --> L[Mark Passed]
-    
-    K --> M[Teardown Phase]
-    L --> M
-    
-    M --> N[Delete Namespace]
-    N --> O[Resources Garbage Collected]
-    O --> P[Next Test or Exit]
-    
-    style G fill:#d4f1f4,stroke:#333
-    style I fill:#fdfd96,stroke:#333
-    style N fill:#ffcccb,stroke:#333
+    subgraph TestLoop [Verification Cycle]
+        LoopStart --> PreClean[Ensure Clean Route53 State]
+        PreClean --> Deploy[🚀 Deploy Test Resource]
+        Deploy --> CheckCreate{DNS Created?}
+        
+        CheckCreate -- Timeout --> FailCreate[FAIL: Propagation Timeout]:::fail
+        CheckCreate -- Yes --> ModeCheck{Is 'Sync' Mode?}
+        
+        ModeCheck -- Yes --> K8sDelete[Delete K8s Resource]
+        K8sDelete --> CheckDelete{DNS Deleted?}
+        CheckDelete -- Timeout --> FailDelete[FAIL: Deletion Timeout]:::fail
+        CheckDelete -- Yes --> Cleanup
+        
+        ModeCheck -- No (Upsert) --> Cleanup[🧹 Force Route53 Cleanup]
+    end
+
+    Cleanup --> LoopStart
+    LoopStart -- All Done --> Teardown[🗑 Delete Temp Namespace]:::process
+    Teardown --> Success([✅ SUCCESS]):::success
+
 
 ```
 
-### Execution Steps
+### What I Changed:
 
-1. **Discovery:** Connects to the cluster, finds the active `external-dns` pod, and validates its version and CLI arguments.
-2. **Clean Slate:** Checks AWS Route53 to ensure the target DNS record does *not* exist. If found, it forces a cleanup.
-3. **Isolation:** Creates a temporary, unique Kubernetes Namespace (e.g., `verification-extdns-service`).
-4. **Deployment:** Deploys the test resource (e.g., Nginx Service) into the temporary namespace.
-5. **Verification:** Polls the AWS Route53 API until the expected `A` and `TXT` records appear.
-6. **Teardown:** Deletes the temporary namespace (instantly cleaning up K8s resources) and ensures Route53 records are removed.
-
-## 🛠️ Configuration
-
-The application is configured entirely via Environment Variables.
-
-| Variable | Description | Required | Default |
-| --- | --- | --- | --- |
-| `HOSTED_ZONE_NAME` | The target Route53 Hosted Zone domain (e.g., `dev.example.com.`) | **Yes** | - |
-| `TEST_IMAGE` | Docker image to use for dummy test pods (e.g., `nginx:alpine`) | **Yes** | - |
-| `EXTERNAL_DNS_EXPECTED_VERSION` | The version string to verify (e.g., `v0.14.0`) | **Yes** | - |
-| `AWS_REGION` | AWS Region for Route53 API calls | No | `ap-east-1` |
-| `TEST_NAMESPACE` | Base name for test namespaces | No | `verification-external-dns` |
-
-## 🔐 Permissions & Remote Execution
-
-This script is designed to run remotely (e.g., ArgoCD). It requires the following permissions:
-
-### AWS IAM (Service Account)
-
-If running on EKS with IRSA, the Service Account requires:
-
-* **Policy:** `AmazonRoute53DomainsFullAccess` (or scoped equivalent)
-* **Specific Actions:**
-* `route53:ListHostedZones`
-* `route53:ListResourceRecordSets`
-* `route53:ChangeResourceRecordSets`
-* `route53:GetChange`
-
-
-
-### Kubernetes RBAC
-
-The runner requires a `Role` or `ClusterRole` with access to:
-
-* **Namespaces:** `[create, delete, get, list]`
-* **Pods:** `[list, get]` (To inspect the external-dns controller)
-* **Services / Ingresses / Gateways:** `[create, get, delete]` (To deploy test resources)
-
-## 💻 Local Development
-
-### Prerequisites
-
-* **Language Runtime:** Python 3.11+
-* **Tools:** `kubectl`, `aws-cli`
-* **Python Manager:** `uv`
-
-### Running Locally
-
-#### Option A: Python (via `uv`)
-
-We use `uv` for dependency management and execution. Do not manually create venvs.
-
-1. **Define Environment Variables:** Create a `.env` file or pass variables inline.
-```bash
-# Create a local .env file
-echo "HOSTED_ZONE_NAME=dev.example.com." > .env
-echo "TEST_IMAGE=nginx:alpine" >> .env
-echo "EXTERNAL_DNS_EXPECTED_VERSION=v0.14.0" >> .env
-
-```
-
-
-2. **Run the Script:** Use `uv run` with the `--env-file` flag to execute the entry point.
-```bash
-# Run with .env file (Recommended)
-uv run --env-file .env main.py
-
-# OR run with inline flags
-HOSTED_ZONE_NAME=dev.example.com. TEST_IMAGE=nginx:alpine uv run main.py
-
-```
-
-
-
-## 🔗 Resources
-
-* **Runbook:** [Link to Confluence/Notion Runbook]
-* **Related Repo:** [Link to external-dns-charts or infra repo]
-* **Container Image:** [Link to ECR/Artifactory]
-
-## ❓ Troubleshooting
-
-**Issue: "DNS Propagation Timed Out"**
-
-* **Cause:** Route53 updates can take up to 60s. Sometimes `external-dns` is slow to pick up the change if the sync interval is high.
-* **Fix:** Check `external-dns` pod logs to see if it processed the event. Verify `AWS_REGION` matches the Hosted Zone.
-
-**Issue: "Permission Denied: namespaces"**
-
-* **Cause:** The script tries to create/delete namespaces for isolation.
-* **Fix:** Ensure your local kubecontext or the ArgoCD ServiceAccount has `ClusterRole` permissions for Namespaces.
-
-## 📂 Project Structure
-
-```text
-.
-├── main.py                 # Entry point (Signal Handling & Logging)
-├── lib/
-│   ├── config.py           # Config loading & Validation
-│   ├── k8s.py              # Infra Manager & Deployment Logic
-│   ├── route53.py          # AWS Boto3 Wrappers
-│   ├── external_dns.py     # Discovery Logic
-│   └── utils.py            # Test Suite Runners
-├── manifests/              # YAML templates for test resources
-│   ├── service.yaml
-│   ├── ingress.yaml
-│   └── gateway.yaml
-├── pyproject.toml          # Python dependencies (managed by uv)
-└── README.md
-
-```
+1. **Removed "Version Mismatch":** Your `external_dns.py` checks for arguments (`--policy`, `--source`), not version numbers, so I removed that confusion.
+2. **Added "Sync vs Upsert" Path:** This is a crucial piece of logic in your code (lines 96-98 in `verification_runner.py`). The diagram now shows that if you are in `upsert-only` mode, we skip the deletion verification.
+3. **Simplified Teardown:** Grouped the final namespace deletion at the end to show it happens regardless of the loop result.
