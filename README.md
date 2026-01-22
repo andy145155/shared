@@ -2,43 +2,54 @@
 
 ```mermaid
 flowchart TD
-    %% --- Styles ---
-    classDef success fill:#e6fffa,stroke:#2c7a7b,stroke-width:2px;
-    classDef fail fill:#fff5f5,stroke:#c53030,stroke-width:2px;
-    classDef process fill:#ebf8ff,stroke:#2b6cb0,stroke-width:1px;
-    classDef secure fill:#e9d8fd,stroke:#6b46c1,stroke-width:2px;
+    %% --- Styling Definitions ---
+    classDef default fill:#fff,stroke:#333,stroke-width:1px,rx:5px,ry:5px;
+    classDef primary fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
+    classDef success fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
+    classDef warning fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;
+    classDef error fill:#ffebee,stroke:#c62828,stroke-width:2px;
+    classDef secure fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;
 
-    %% --- Main Vertical Spine (Happy Path) ---
-    %% We define these links first to encourage a straight vertical line
-    Start([Start Verification]) --> Detect[🔍 Detect ExternalDNS Config]
-    Detect -- Success --> Setup[🛠 Create Temp Namespace]:::process
-    Setup --> Bootstrap["🔐 Bootstrap RBAC\n(Bind to 'verification-rules' ClusterRole)"]:::secure
-    Bootstrap --> LoopStart{For Each Source}
-
-    %% --- Side Branches (Error Cases) ---
-    %% These will branch off the main spine
-    Detect -- No Pod Found --> FailInit[FAIL: No Running Pods]:::fail
+    %% --- Initialization Phase ---
+    Start([🚀 Start Job]) --> Detect(🔍 Detect Config)
+    
+    Detect -- No Pod --> FailInit[❌ Fail: No Pods]:::error
+    Detect --> Setup(🛠 Create Temp Namespace):::primary
+    
+    Setup --> Bootstrap(🔐 Bootstrap RBAC):::secure
+    Bootstrap --> LoopStart{{ 🔄 For Each Source }}:::warning
 
     %% --- The Verification Loop ---
-    subgraph TestLoop [Verification Cycle]
+    subgraph Loop ["Verification Logic"]
         direction TB
-        LoopStart --> PreClean[Ensure Clean Route53 State]
-        PreClean --> Deploy[🚀 Deploy Test Resource]
+        LoopStart --> PreClean(🧹 Clean Route53)
+        PreClean --> Deploy(🚀 Deploy Test Resource)
         Deploy --> CheckCreate{DNS Created?}
         
-        CheckCreate -- Timeout --> FailCreate[FAIL: Propagation Timeout]:::fail
-        CheckCreate -- Yes --> ModeCheck{Is 'Sync' Mode?}
-        
-        ModeCheck -- Yes --> K8sDelete[Delete K8s Resource]
+        %% Success Path
+        CheckCreate -- Yes --> SyncCheck{Sync Mode?}
+        SyncCheck -- Yes --> K8sDelete(🗑 Delete K8s Res)
         K8sDelete --> CheckDelete{DNS Deleted?}
-        CheckDelete -- Timeout --> FailDelete[FAIL: Deletion Timeout]:::fail
-        CheckDelete -- Yes --> Cleanup
         
-        ModeCheck -- No (Upsert) --> Cleanup[🧹 Force Route53 Cleanup]
+        CheckDelete -- Yes --> Cleanup
+        SyncCheck -- No/Upsert --> Cleanup(✨ Cleanup)
+        
+        %% Error Paths
+        CheckCreate -- No --> FailLoop[❌ Fail: Timeout]:::error
+        CheckDelete -- No --> FailLoop
     end
 
-    %% --- Teardown ---
+    %% --- Loop Back & Termination ---
     Cleanup --> LoopStart
-    LoopStart -- All Done --> Teardown[🗑 Delete Temp Namespace]:::process
-    FailInit & FailCreate & FailDelete --> Teardown
-    Teardown --> Success([✅ SUCCESS]):::success
+    
+    LoopStart -- Done --> Teardown(🗑 Delete Namespace):::primary
+    FailLoop --> Teardown
+    FailInit --> Teardown
+    
+    Teardown --> End([✅ Success]):::success
+
+    %% --- Apply Styles ---
+    class Start,End,Detect,PreClean,Deploy,K8sDelete,Cleanup default
+    
+    %% Hide the subgraph border for a cleaner look
+    style Loop fill:none,stroke:none
