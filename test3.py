@@ -1,94 +1,56 @@
-import logging
-import time
-from contextlib import contextmanager
-from typing import Tuple
-from kubernetes import client, config as k8s_config, utils
-from kubernetes.client.rest import ApiException
+import boto3
 
-logger = logging.getLogger(__name__)
+def get_instances_with_double_lookup(replication_group_id, region_name='us-east-1'):
+    client = boto3.client('elasticache', region_name=region_name)
 
-Clients = Tuple[client.ApiClient, client.CoreV1Api]
-
-def wait_for_namespace_termination(core_api: client.CoreV1Api, namespace: str, timeout: int = 120):
-    """
-    Reusable blocking function.
-    Waits until the namespace returns 404 (Gone).
-    """
-    logger.info(f"Waiting for namespace '{namespace}' to terminate...")
-    start_time = time.time()
-    
-    while True:
-        try:
-            core_api.read_namespace(name=namespace)
-            
-            # Still exists? Check timeout.
-            if time.time() - start_time > timeout:
-                raise TimeoutError(f"Namespace {namespace} stuck in Terminating state for > {timeout}s")
-            
-            time.sleep(2)
-            
-        except ApiException as e:
-            if e.status == 404:
-                logger.info(f"Namespace '{namespace}' is fully terminated.")
-                return # Success
-            raise # Unexpected API error
-
-def recreate_namespace(core_api: client.CoreV1Api, namespace: str):
-    """
-    Nuke and Pave strategy.
-    """
-    logger.warning(f"Recreating namespace '{namespace}' for a clean state...")
-
-    # 1. Trigger Deletion
-    try:
-        core_api.delete_namespace(name=namespace)
-    except ApiException as e:
-        if e.status != 404: 
-            raise
-
-    # 2. Re-use the wait logic
-    wait_for_namespace_termination(core_api, namespace)
-
-    # 3. Create Fresh
-    logger.info(f"Creating fresh namespace: {namespace}")
-    core_api.create_namespace(
-        body=client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace))
+    # 1. Get the Replication Group Topology
+    print(f"Fetching topology for: {replication_group_id}...")
+    rg_response = client.describe_replication_groups(
+        ReplicationGroupId=replication_group_id
     )
-
-@contextmanager
-def infrastructure_manager(clients: Clients, namespace: str, cleanup: bool = True):
-    """
-    Context Manager.
-    Setup: Ensures Fresh Namespace.
-    Teardown: Deletes AND Waits (so the CI job doesn't leave 'Terminating' junk).
-    """
-    _, core_api = clients
     
-    # --- SETUP ---
-    try:
-        core_api.create_namespace(
-            body=client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace))
-        )
-        logger.info(f"Created namespace: {namespace}")
-    except ApiException as e:
-        if e.status == 409:
-            recreate_namespace(core_api, namespace)
-        else:
-            raise
+    # We assume usually 1 replication group matches the ID
+    rep_group = rg_response['ReplicationGroups'][0]
+    node_groups = rep_group.get('NodeGroups', [])
 
-    try:
-        yield
-    finally:
-        # --- TEARDOWN ---
-        if cleanup:
-            logger.info(f"[Cleanup] Deleting namespace '{namespace}'...")
-            try:
-                core_api.delete_namespace(name=namespace)
-                
-                # OPTIONAL: Now we reuse the logic to ensure a clean exit
-                # This guarantees the next job won't hit a "Terminating" conflict
-                wait_for_namespace_termination(core_api, namespace, timeout=60)
-                
-            except ApiException as e:
-                if e.status != 404:
-                    logger.warning(f"[Cleanup] Failed to delete/wait: {e}")
+    for shard in node_groups:
+        shard_id = shard.get('NodeGroupId')
+        print(f"\n--- Processing Shard: {shard_id} ---")
+        
+        # In Cluster Mode Enabled, the "PrimaryEndpoint" *should* be here at the Shard level.
+        # If it is missing (as you found), we must resolve the members manually.
+        
+        for member in shard.get('NodeGroupMembers', []):
+            # The member has the ID but often no Endpoint info
+            cache_cluster_id = member.get('CacheClusterId')
+            member_role = member.get('CurrentRole', 'unknown') # Often missing in Cluster Mode Enabled
+            
+            if cache_cluster_id:
+                # 2. THE DOUBLE LOOKUP: Resolve the ID to an Endpoint
+                try:
+                    cluster_response = client.describe_cache_clusters(
+                        CacheClusterId=cache_cluster_id,
+                        ShowCacheNodeInfo=True # Crucial flag to get endpoints
+                    )
+                    
+                    # There is usually only 1 cluster in the list when querying by ID
+                    # And usually 1 node per cluster in this context
+                    cluster_info = cluster_response['CacheClusters'][0]
+                    cache_nodes = cluster_info.get('CacheNodes', [])
+                    
+                    if cache_nodes:
+                        endpoint = cache_nodes[0].get('Endpoint', {})
+                        addr = endpoint.get('Address')
+                        port = endpoint.get('Port')
+                        
+                        print(f"Node: {cache_cluster_id}")
+                        print(f"  > Address: {addr}:{port}")
+                        print(f"  > Role (API hint): {member_role}")
+                        
+                        # Note: If API Role is unknown, you must ask Redis directly (see below)
+                        
+                except Exception as e:
+                    print(f"  > Could not resolve details for {cache_cluster_id}: {e}")
+
+# Usage
+get_instances_with_double_lookup('my-cluster-id')
