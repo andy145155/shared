@@ -1,27 +1,14 @@
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: verification-runner
-  namespace: verification-external-dns
-subjects:
-  - kind: ServiceAccount
-    name: external-dns
-    namespace: external-dns
-roleRef:
-  kind: ClusterRole
-  name: verification-job-rules  # The strict blueprint we created in ArgoCD
-  apiGroup: rbac.authorization.k8s.io
-
-
-  def cleanup():
-    # You can also read the NS file to know what to delete!
-    ns_body = load_yaml_file("ns.yaml")
-    target_ns = ns_body['metadata']['name']
-    
-    print(f"\n--- Cleaning Up {target_ns} ---")
-    try:
-        v1.delete_namespace(name=target_ns)
-        print(" -> Namespace deleted.")
-    except ApiException as e:
-        if e.status == 404:
-            print(" -> Namespace already gone.")
+dr-drill-automation/
+├── main.py              <-- The CLI Entry Point (The "Switchboard")
+├── config/
+│   └── settings.py
+├── utils/
+│   ├── logger.py
+│   └── auth.py          <-- NEW: specific infrastructure logic (retrieve_credential)
+├── workflows/           <-- NEW: High-level orchestration
+│   ├── drills.py        <-- Contains: simulate_az_failure, recover_az
+│   └── reporting.py     <-- Contains: generate_evidence
+└── dataservice/         <-- The "Worker" modules (Business Logic)
+    ├── aurora.py
+    ├── elasticache.py
+    └── efs.py
