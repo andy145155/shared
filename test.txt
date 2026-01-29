@@ -1,30 +1,9 @@
-Here is a clean, simplified **Kubernetes RBAC** section for your README.
+TL;DR: I’m removing the current ingress verification test (verification_istio.py). It creates more maintenance debt than value due to persistent hairpinning issues inside the cluster.
 
-Instead of pasting large blocks of YAML, this table summarizes *what* the script creates and *why* it needs those permissions. It highlights the security model (bootstrapping) we discussed.
+The Context: We have been blocked by TLS connect errors and SNI mismatches when trying to curl our Ingress Gateway from inside the cluster.
 
----
+The Specifics: Although only the app cluster is having this problem, we have not been able to isolate the definitive root cause after significant debugging.
 
-## 🔐 Kubernetes RBAC
+The Decision: Rather than sinking more time into investigation or building complex workarounds (like custom certs or sidecar bypasses) for a test-only issue, we are choosing to remove this test to unblock the pipeline.
 
-This tool operates on a **Least Privilege** model. It does not run with admin privileges. Instead, it uses a "Bootstrapper" pattern: the job starts with just enough permission to create a sandbox, then grants itself testing rules *only* within that sandbox.
-
-### Required Permissions
-
-The `ServiceAccount` running this job requires the following rules:
-
-| Scope | Resources | Verbs | Reason |
-| --- | --- | --- | --- |
-| **Discovery** | `pods` | `get`, `list` | To find the running `external-dns` pod and inspect its CLI arguments. |
-| **Lifecycle** | `namespaces` | `create`, `delete`, `get` | To create and destroy the ephemeral `verification-external-dns-...` namespace. |
-| **Security** | `clusterroles` | `bind` | To bind the **Test Rules** (see below) to the ephemeral namespace. |
-| **Security** | `rolebindings` | `create` | To create the binding inside the ephemeral namespace. |
-
-### Test Rules (Ephemeral)
-
-Once the temporary namespace is created, the script binds a restricted ClusterRole (`verification-rules`) that allows creating test resources. These permissions are **strictly scoped** to the temporary namespace:
-
-* **Services:** `create`, `delete`
-* **Ingresses:** `create`, `delete`
-* **Istio Gateways:** `create`, `delete`
-
-> **Note:** The script cannot create or delete resources in any other namespace (e.g., `default`, `kube-system`).
+The Fix: We will rely on istioctl analyze for config validation and move actual end-to-end connectivity tests to our external CI pipeline (where they belong).
