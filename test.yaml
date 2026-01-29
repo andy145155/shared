@@ -1,14 +1,41 @@
-dr-drill-automation/
-├── main.py              <-- The CLI Entry Point (The "Switchboard")
-├── config/
-│   └── settings.py
-├── utils/
-│   ├── logger.py
-│   └── auth.py          <-- NEW: specific infrastructure logic (retrieve_credential)
-├── workflows/           <-- NEW: High-level orchestration
-│   ├── drills.py        <-- Contains: simulate_az_failure, recover_az
-│   └── reporting.py     <-- Contains: generate_evidence
-└── dataservice/         <-- The "Worker" modules (Business Logic)
-    ├── aurora.py
-    ├── elasticache.py
-    └── efs.py
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "S3ReportBucketAccess",
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:ListBucket"
+            ],
+            "Resource": [
+                "arn:aws:s3:::YOUR_REPORT_BUCKET_NAME",
+                "arn:aws:s3:::YOUR_REPORT_BUCKET_NAME/*"
+            ]
+        },
+        {
+            "Sid": "AllowCrossAccountAssume",
+            "Effect": "Allow",
+            "Action": "sts:AssumeRole",
+            "Resource": "arn:aws:iam::*:role/YOUR_TARGET_ROLE_NAME"
+        }
+    ]
+}
+
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ConfigReadAccess",
+            "Effect": "Allow",
+            "Action": [
+                "config:DescribeConfigRules",
+                "config:GetComplianceDetailsByConfigRule",
+                "config:DescribeConfigurationRecorders"
+            ],
+            "Resource": "*"
+        }
+    ]
+}

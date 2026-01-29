@@ -1,107 +1,73 @@
-import logging
-import time
-import sys
-from lib.utils import apply_yaml_template, run_command
+# config.py
+import os
 
-# Configuration
-# Assuming these are passed in or defined globally as per your screenshot context
-# INGRESS_HOST = "verification.example.com"
-# TARGET_APP_NAME = "httpbin"
-# TEST_NAMESPACE = "platform-automation"
-
-def get_ingress_info():
-    """Retrieves the ClusterIP of the istio-ingressgateway."""
-    # This is safer than LoadBalancer IP for internal cluster testing
-    cmd = "kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.spec.clusterIP}'"
-    ip, _ = run_command(cmd, check=False)
-    return ip.strip().strip("'")
-
-def curl_ingress(path, host_header, resolve_ip, description):
-    """
-    Executes a precise curl command and returns the status code and latency.
-    """
-    url = f"https://{host_header}{path}"
-    logging.info(f"--- TEST: {description} ---")
+class Config:
+    # AWS Settings
+    REGIONS = os.getenv("TARGET_REGIONS", "us-east-1,ap-east-1").split(",")
     
-    # curl flags:
-    # -k: Skip cert validation (since we are testing connectivity, not PKI trust here)
-    # --resolve: Force the domain to map to the Ingress ClusterIP
-    # -o /dev/null: Throw away the body
-    # -w: output format to capture Code and Latency
-    cmd = (
-        f"kubectl exec {CLIENT_APP_NAME} -n {TEST_NAMESPACE} -- "
-        f"curl -k -s -o /dev/null "
-        f"--resolve {host_header}:443:{resolve_ip} "
-        f"-w '%{{http_code}},%{{time_total}}' "
-        f"'{url}'"
+    # Logic: Regions to skip for specific account patterns
+    REGION_EXCLUSIONS = {
+        "ap-east-1": ["secondary"] # Skip ap-east-1 if account name contains 'secondary'
+    }
+
+    # Reporting Settings
+    ENV_IDENTIFIERS = {
+        "prod": ["prod", "production", "pr-"],
+        "stg": ["stg", "staging"],
+        "dev": ["dev", "development"]
+    }
+
+
+from config import Config
+
+class Account:
+    def __init__(self, acc_id, acc_name, organizational_unit, session):
+        self.acc_id = acc_id
+        self.acc_name = acc_name
+        # ... (rest of init)
+
+    def _should_scan_region(self, region):
+        """Centralized logic to decide if a region should be scanned."""
+        exclusions = Config.REGION_EXCLUSIONS.get(region, [])
+        for keyword in exclusions:
+            if keyword in self.acc_name.lower():
+                return False
+        return True
+
+    def check_compliance(self):
+        for region in Config.REGIONS:
+            if not self._should_scan_region(region):
+                continue
+            
+            try:
+                self.generate_result(region)
+            except Exception as e:
+                logging.error(f"Failed to scan {self.acc_name} in {region}: {e}")
+
+class ConfigRule:
+    def set_tags(self, tags):
+        # Priority list: Look for 'mox.application', then 'Application', then 'App'
+        tag_map = {k['Key']: k['Value'] for k in tags}
+        
+        self.tags['Application'] = self._find_tag_value(tag_map, ['mox.application', 'Application', 'App'])
+        self.tags['Owner'] = self._find_tag_value(tag_map, ['mox.owner', 'Owner', 'Team'])
+        self.tags['Environment'] = self._find_tag_value(tag_map, ['mox.environment', 'Environment', 'Env'])
+
+    def _find_tag_value(self, tag_map, keys_to_check):
+        """Returns the first matching value from a list of possible keys."""
+        for key in keys_to_check:
+            if key in tag_map:
+                return tag_map[key]
+        return "UNSUPPORTED"
+
+# In generate_report.py
+
+# CHANGE: Use 'num' (number) instead of 'percentile' for absolute thresholds.
+# Example: 0-80 is RED, 80-100 is GREEN (or however you define your gradient)
+ws.conditional_formatting.add(f'D1:D{max_row}',
+    ColorScaleRule(
+        start_type='num', start_value=50, start_color=color_red,
+        mid_type='num', mid_value=80, mid_color=color_yellow,
+        end_type='num', end_value=100, end_color=color_green
     )
-
-    # Retry logic for "Warm up" (Istio sidecars can take a moment to sync routes)
-    for attempt in range(1, 4):
-        stdout, _ = run_command(cmd, check=False)
-        try:
-            parts = stdout.strip().split(',')
-            status_code = parts[0]
-            latency = float(parts[1])
-            logging.info(f"    Attempt {attempt}: Code={status_code}, Latency={latency}s")
-            return status_code, latency
-        except ValueError:
-            logging.warning(f"    Attempt {attempt}: Curl failed to parse. Retrying...")
-            time.sleep(2)
-    
-    raise RuntimeError(f"Failed to execute curl for {description}")
-
-def run_ingress_tests():
-    logging.info("Initializing Istio Ingress Verification Suite (httpbin edition)...")
-    
-    # 1. Apply Manifests
-    apply_yaml_template(
-        template_path="manifests/ingress.yaml",
-        TEST_NAMESPACE=TEST_NAMESPACE,
-        INGRESS_HOST=INGRESS_HOST,
-        TARGET_APP_NAME=TARGET_APP_NAME
-    )
-    
-    ingress_ip = get_ingress_info()
-    logging.info(f"Resolved Ingress Gateway IP: {ingress_ip}")
-
-    # ---------------------------------------------------------
-    # TEST CASE 1: Happy Path (End-to-End Connectivity)
-    # ---------------------------------------------------------
-    # We ask httpbin to explicitly return 200.
-    code, _ = curl_ingress("/status/200", INGRESS_HOST, ingress_ip, "Happy Path Connectivity")
-    
-    if code == "200":
-        logging.info("✅ PASS: Traffic reached httpbin and returned 200.")
-    else:
-        raise RuntimeError(f"❌ FAIL: Expected 200, got {code}")
-
-    # ---------------------------------------------------------
-    # TEST CASE 2: Resilience (Timeout Enforcement)
-    # ---------------------------------------------------------
-    # VirtualService has 3s timeout. We ask httpbin to delay for 5s.
-    # Result: Istio should cut it off and return 504 Gateway Timeout.
-    code, latency = curl_ingress("/delay/5", INGRESS_HOST, ingress_ip, "Timeout Enforcement")
-    
-    if code == "504":
-        logging.info("✅ PASS: Istio correctly terminated the slow request (Gateway Timeout).")
-    elif code == "200":
-        logging.error(f"❌ FAIL: Request completed successfully despite 3s timeout setting. Latency: {latency}s")
-        # This implies the VirtualService timeout configuration is ignored or missing
-    else:
-        logging.warning(f"⚠️ WARN: Unexpected code {code}. Expected 504.")
-
-    # ---------------------------------------------------------
-    # TEST CASE 3: Security (Host Isolation)
-    # ---------------------------------------------------------
-    # We send a request to the Ingress IP, but with a Host header that DOES NOT match the Gateway.
-    # Result: Envoy should reject this immediately (usually 404 or 421).
-    fake_host = "hacker.test.com"
-    code, _ = curl_ingress("/status/200", fake_host, ingress_ip, "Host Header Isolation")
-    
-    if code in ["404", "421"]:
-        logging.info(f"✅ PASS: Gateway correctly rejected invalid host '{fake_host}' with {code}.")
-    else:
-        raise RuntimeError(f"❌ SECURITY FAIL: Gateway allowed traffic for unauthorized host! Code: {code}")
-
-    logging.info("🏆 All Ingress Verification Tests Completed Successfully.")
+)
