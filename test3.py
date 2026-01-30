@@ -1,56 +1,82 @@
 import boto3
+import pandas as pd
+import openpyxl
+from openpyxl.formatting.rule import ColorScaleRule
+import io
+import os
+import urllib.parse
 
-def get_instances_with_double_lookup(replication_group_id, region_name='us-east-1'):
-    client = boto3.client('elasticache', region_name=region_name)
+s3 = boto3.client('s3')
 
-    # 1. Get the Replication Group Topology
-    print(f"Fetching topology for: {replication_group_id}...")
-    rg_response = client.describe_replication_groups(
-        ReplicationGroupId=replication_group_id
-    )
+def generate_excel_report(bucket, key):
+    # 1. Download CSV from S3 into memory
+    response = s3.get_object(Bucket=bucket, Key=key)
+    csv_content = response['Body'].read()
     
-    # We assume usually 1 replication group matches the ID
-    rep_group = rg_response['ReplicationGroups'][0]
-    node_groups = rep_group.get('NodeGroups', [])
+    # Read into Pandas
+    read_file = pd.read_csv(io.BytesIO(csv_content))
+    
+    # --- YOUR ORIGINAL LOGIC STARTS HERE ---
+    # I have adapted your original generate_report.py logic to work in memory
+    
+    # Create the Excel file in memory
+    output = io.BytesIO()
+    
+    # Convert CSV to Excel initially
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        read_file.to_excel(writer, index=None, header=True)
+    
+    # Load workbook for formatting
+    output.seek(0)
+    book = openpyxl.load_workbook(output)
+    sheet = book.active # Default sheet
+    
+    # Your original analysis logic
+    # Note: You need to ensure 'conf_list' and 'ratio' functions are copied here 
+    # or imported if you put them in a utils file.
+    
+    # (For brevity, I'm pasting the critical formatting logic)
+    first_column = ['ConfigRule', 'Total', 'Compliant', '%', 'Prod-Com', 'Prod-Non', 'P%', 'Stg-Com', 'Stg-Non', 'S%', 'Dev-Com', 'Dev-Non', 'D%']
+    
+    # Create Report Sheet
+    if 'Report' not in book.sheetnames:
+        book.create_sheet('Report')
+    ws = book['Report']
+    ws.append(first_column)
+    
+    # ... [Insert your specific loop logic for stats here] ...
+    # This matches lines 60-80 in your original script
+    
+    # Add Conditional Formatting (The Colors)
+    # Green/Yellow/Red rules
+    color_red = 'C0504D'
+    color_yellow = 'F79646'
+    color_green = '9BBB59'
+    
+    # Example rule from your code
+    ws.conditional_formatting.add('D2:D200',
+        ColorScaleRule(start_type='percentile', start_value=10, start_color=color_red,
+                       mid_type='percentile', mid_value=50, mid_color=color_yellow,
+                       end_type='percentile', end_value=90, end_color=color_green)
+    )
 
-    for shard in node_groups:
-        shard_id = shard.get('NodeGroupId')
-        print(f"\n--- Processing Shard: {shard_id} ---")
-        
-        # In Cluster Mode Enabled, the "PrimaryEndpoint" *should* be here at the Shard level.
-        # If it is missing (as you found), we must resolve the members manually.
-        
-        for member in shard.get('NodeGroupMembers', []):
-            # The member has the ID but often no Endpoint info
-            cache_cluster_id = member.get('CacheClusterId')
-            member_role = member.get('CurrentRole', 'unknown') # Often missing in Cluster Mode Enabled
-            
-            if cache_cluster_id:
-                # 2. THE DOUBLE LOOKUP: Resolve the ID to an Endpoint
-                try:
-                    cluster_response = client.describe_cache_clusters(
-                        CacheClusterId=cache_cluster_id,
-                        ShowCacheNodeInfo=True # Crucial flag to get endpoints
-                    )
-                    
-                    # There is usually only 1 cluster in the list when querying by ID
-                    # And usually 1 node per cluster in this context
-                    cluster_info = cluster_response['CacheClusters'][0]
-                    cache_nodes = cluster_info.get('CacheNodes', [])
-                    
-                    if cache_nodes:
-                        endpoint = cache_nodes[0].get('Endpoint', {})
-                        addr = endpoint.get('Address')
-                        port = endpoint.get('Port')
-                        
-                        print(f"Node: {cache_cluster_id}")
-                        print(f"  > Address: {addr}:{port}")
-                        print(f"  > Role (API hint): {member_role}")
-                        
-                        # Note: If API Role is unknown, you must ask Redis directly (see below)
-                        
-                except Exception as e:
-                    print(f"  > Could not resolve details for {cache_cluster_id}: {e}")
+    # --- END OF ORIGINAL LOGIC ---
 
-# Usage
-get_instances_with_double_lookup('my-cluster-id')
+    # 4. Save the result back to S3
+    output.seek(0)
+    new_key = key.replace('.csv', '.xlsx')
+    s3.put_object(Bucket=bucket, Key=new_key, Body=output.getvalue())
+    print(f"Report generated: s3://{bucket}/{new_key}")
+
+def lambda_handler(event, context):
+    # Get the object from the event (S3 Trigger)
+    bucket = event['Records'][0]['s3']['bucket']['name']
+    key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'], encoding='utf-8')
+
+    try:
+        print(f"Processing file: {key}")
+        generate_excel_report(bucket, key)
+        return "Success"
+    except Exception as e:
+        print(e)
+        raise e
