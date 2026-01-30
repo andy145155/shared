@@ -1,158 +1,131 @@
-This is a good draft, but we can make it much stronger.
+This is a significant improvement to your design document. Below is a refined, professional version that you can copy directly.
 
-Currently, the document lists "Lambda Only" and "Fargate" as options but doesn't firmly recommend one or explain **how** to overcome the 15-minute timeout constraint without using Fargate.
-
-I have restructured the design document below to be more professional, decisive, and technically detailed. I explicitly added a **Scalability Analysis** section to prove why the "Multithreaded Lambda" approach will work (and why you don't need Fargate yet).
-
-Here is the improved Design Document.
+I have structured it to clearly contrast the **four architectural options**, specifically detailing the logic flow for each so stakeholders can understand *how* they differ. I also updated the comparison table to be more decisive.
 
 ---
 
-# Design Document: Automated AWS Config Compliance Reporting
+# Design Document: AWS Config Compliance Report Automation
 
 ## 1. Problem Statement
 
-Currently, the Platform Engineering team manually executes a local script to generate weekly AWS Config compliance reports. This process is:
+We currently execute a manual, local Python script to generate weekly AWS Config compliance reports. This process is time-consuming, relies on local credentials (`aws-okta`), and lacks auditability. The goal is to migrate this logic to a fully automated, cloud-native solution on AWS that runs weekly and auto-generates a Jira ticket.
 
-* **Time-consuming:** Requires an engineer to manually run scripts and wait for completion.
-* **Fragile:** Relies on local credentials (`aws-okta`) and local dependencies.
-* **Non-Auditable:** No centralized logs or history of report generation status.
-* **Unscalable:** Serial execution takes too long as the number of accounts grows.
+## 2. Requirements
 
-## 2. Proposed Solution
-
-We will migrate the local logic to an **Event-Driven, Decoupled Serverless Architecture** on AWS. The process will be split into two distinct stages (Scanning vs. Reporting) to ensure scalability and avoid Lambda timeouts.
-
-### 2.1 High-Level Architecture
-
-The workflow follows this "Hub-and-Spoke" pattern:
-
-1. **Trigger:** **Amazon EventBridge Scheduler** triggers the *Scanner Lambda* every Monday at 9:00 AM.
-2. **Phase 1 (Scanning):** The **Scanner Lambda** (`ptdev/prod-sec-control`) assumes the `read-role` in all target accounts in parallel. It aggregates raw compliance data and uploads a CSV to an **S3 Bucket**.
-3. **Phase 2 (Reporting):** An **S3 Event Notification** detects the new CSV and triggers the **Reporter Lambda**. This function reads the CSV, applies formatting (Excel coloring, stats), and saves the final `.xlsx` report back to S3.
-
-### 2.2 Why this Architecture? (Decision Record)
-
-| Feature | Selected: Decoupled Lambda (Multithreaded) | Option B: Fargate | Option C: Step Functions |
-| --- | --- | --- | --- |
-| **Cost** | Low (Pay per ms) | Medium (Always on/Provisioning time) | Medium (State transitions cost) |
-| **Complexity** | Low (Python `concurrent.futures`) | High (Docker, ECR, ECS Task defs) | Medium (ASL definition) |
-| **Timeout Risk** | **Mitigated** (See Section 3) | None (No timeout) | Low |
-| **Maintenance** | Minimal (Code only) | Medium (OS patching, image builds) | Minimal |
-
-**Decision:** We choose **Lambda (Multithreaded)**.
-
-* *Justification:* Using Python's `ThreadPoolExecutor`, we can run 20+ concurrent API calls. This reduces the runtime for 500 accounts from ~45 minutes (serial) to ~2.5 minutes (parallel), fitting comfortably within the 15-minute Lambda limit.
+* **Hub-and-Spoke Model:** A central security account (`*-sec-control`) must scan all target accounts.
+* **Scalability:** Must handle hundreds of accounts without hitting AWS Lambda's 15-minute timeout.
+* **Security:** Must use IAM Roles (not user credentials) with least-privilege permissions.
+* **Output:** Generate an Excel report with conditional formatting and upload to S3.
 
 ---
 
-## 3. Scalability Analysis (Addressing the Timeout)
+## 3. Architecture Options Comparison
 
-*Current Constraint:* AWS Lambda has a hard timeout of 15 minutes.
-*Previous Bottleneck:* Sequential processing of accounts.
+We evaluated four approaches to handle the scale and timeout constraints.
 
-**Math Proof:**
+### Option 1: Lambda + EventBridge "Sharding" (Original Proposal)
 
-* Average time to scan one account (AssumeRole + Config API calls): **~3 seconds**.
-* Total Accounts: **N**.
-* **Serial Execution:** . For 300 accounts, this is 900s (15 mins). **Failed.**
-* **Parallel Execution (20 threads):** . For 300 accounts, this is 45 seconds. **Success.**
+* **Logic:** EventBridge is configured with 4 separate schedules (or targets) triggering the *same* Lambda function at the same time. Each trigger sends a different payload: `{"shard_id": 1, "total_shards": 4}`, `{"shard_id": 2...}`, etc.
+* **Flow:**
+1. EventBridge fires 4 concurrent Lambda invocations.
+2. Each Lambda fetches *all* accounts but processes only its slice (e.g., `if account_index % 4 == shard_id`).
+3. All 4 Lambdas write partial CSVs to S3.
+4. A final "Merger" Lambda combines them (Complex).
 
-**Conclusion:** The Multithreaded Lambda approach supports up to **~5,000 accounts** before hitting the 15-minute limit. We do not need Fargate at this stage.
+
+* **Pros:** Bypasses 15-min timeout by splitting work.
+* **Cons:** High complexity. "Sharding" logic is brittle; if one shard fails, the report is incomplete. Merging CSVs from multiple sources is error-prone.
+
+### Option 2: Optimized Multi-Threaded Lambda (Recommended)
+
+* **Logic:** A single Lambda function uses Python's `concurrent.futures` to make parallel API calls to hundreds of accounts simultaneously.
+* **Flow:**
+1. EventBridge triggers 1 Lambda.
+2. Lambda fetches account list.
+3. Lambda spawns 20+ threads. Each thread assumes a role and checks one account.
+4. Because the task is I/O bound (waiting for AWS API), threads are extremely efficient.
+5. Results are aggregated in memory and written to S3 in one go.
+
+
+* **Pros:** Lowest operational overhead. Simple deployment (1 function). Fast (processing 200 accounts takes ~2-3 minutes).
+* **Cons:** Hard limit of 15 minutes. If organization grows to 1000+ accounts, this may eventually time out.
+
+### Option 3: Step Functions (Distributed Map)
+
+* **Logic:** AWS Step Functions acts as an orchestrator. It fetches the account list and then "fans out" to trigger a tiny Lambda for *each* account.
+* **Flow:**
+1. Step Function fetches list of 500 accounts.
+2. Step Function "Map State" triggers 500 separate Lambda executions in parallel.
+3. Step Function collects all 500 results into a single array.
+4. Final step generates the CSV.
+
+
+* **Pros:** Infinite scalability. Zero timeout risk. Visual error handling per account.
+* **Cons:** Higher cost (state transitions). Most complex setup (requires defining state machine JSON/ASL).
+
+### Option 4: Serverless Fargate (ECS)
+
+* **Logic:** Run the original script as a containerized task. Fargate has no 15-minute timeout.
+* **Flow:**
+1. EventBridge triggers an ECS Task Definition.
+2. Fargate provisions a container (takes ~1-2 mins to boot).
+3. Script runs sequentially or with simple loops until finished (can run for days).
+
+
+* **Pros:** proven "Lift and shift" (almost no code changes needed). No timeout limits.
+* **Cons:** Slow startup time. Higher cost (paying for vCPU/RAM per second). Overkill for a simple compliance check.
 
 ---
 
-## 4. IAM Security Requirements
+## 4. Decision Matrix
 
-We utilize a **Hub-and-Spoke** model. The "Hub" is the Security Control account (`ptdev-sec-control` / `prod-sec-control`). The "Spokes" are all other AWS accounts.
+| Feature | **Option 1: Lambda Sharding** | **Option 2: Multi-threaded Lambda** | **Option 3: Step Functions** | **Option 4: Fargate** |
+| --- | --- | --- | --- | --- |
+| **Setup Complexity** | High (Sharding logic + Merging results) | **Low** (Standard Python code) | High (State Machine definition) | Medium (Docker + ECR + ECS) |
+| **Scalability** | Medium (Manual shard management) | High (Up to ~800 accts within 15m) | **Infinite** (Distributed Map) | High (No timeouts) |
+| **Cost** | Low | **Lowest** | Medium (State transitions) | High (Container compute time) |
+| **Maintenance** | Difficult (Debugging partial failures) | **Easy** (Single script) | Medium | Medium (Docker image mgmt) |
+| **Execution Time** | < 15 min (per shard) | < 15 min (total) | Unlimited | Unlimited |
+| **Verdict** | 🔴 **Discard** | 🟢 **Select (MVP)** | 🟡 **Future Upgrade** | 🔴 **Discard** |
 
-### 4.1 Hub Account Roles
+**Conclusion:** We will proceed with **Option 2 (Multi-threaded Lambda)**. Refactoring the code to use `concurrent.futures` allows us to process hundreds of accounts in minutes, well under the 15-minute limit, without the complexity of sharding or managing Docker containers.
 
-**Role A: `system-config-report-scanner-role**` (Attached to Scanner Lambda)
+---
 
-* **Trust Policy:** `lambda.amazonaws.com`
+## 5. IAM Architecture (Hub & Spoke)
+
+### Hub Account (Report Generator)
+
+* **Role Name:** `system-config-report-generator-write-role`
+* **Location:** `*-sec-control` (Hub)
 * **Permissions:**
-* `sts:AssumeRole` on `arn:aws:iam::*:role/system-config-report-generator-read-role`
-* `s3:PutObject` on the Report Bucket.
-* `organizations:ListAccounts` (via AssumeRole into Org Master).
+* `sts:AssumeRole`: Resource `arn:aws:iam::*:role/system-config-report-generator-read-role`
+* `s3:PutObject`: To report bucket.
+* `logs:*`: CloudWatch logging.
 
 
 
-**Role B: `system-config-report-formatter-role**` (Attached to Reporter Lambda)
+### Root Account (Discovery)
 
-* **Trust Policy:** `lambda.amazonaws.com`
+* **Role Name:** `system-config-report-generator-list-org-role`
+* **Location:** Organization Management Account
 * **Permissions:**
-* `s3:GetObject` & `s3:PutObject` on the Report Bucket.
-* (Optional) `ses:SendRawEmail` if emailing the report.
-
-
-
-### 4.2 Spoke Account Roles (The Targets)
-
-**Role C: `system-config-report-generator-read-role**`
-
-* **Deployed to:** All Target Accounts.
-* **Trust Policy:** Allow Principal `arn:aws:iam::[HUB_ACCOUNT_ID]:role/system-config-report-scanner-role`
-* **Permissions (Least Privilege):**
-```json
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "config:DescribeConfigRules",
-                "config:DescribeConfigurationRecorders",
-                "config:GetComplianceDetailsByConfigRule",
-                "ec2:DescribeInstances",
-                "ec2:DescribeSecurityGroups",
-                "ec2:DescribeSubnets",
-                "ec2:DescribeVpcs",
-                "ec2:DescribeTags",
-                "iam:ListRoles",
-                "iam:ListUsers",
-                "iam:ListPolicies",
-                "rds:DescribeDBClusters",
-                "rds:DescribeDBInstances",
-                "apigateway:GET",
-                "cloudfront:ListDistributions"
-            ],
-            "Resource": "*"
-        }
-    ]
-}
-
-```
-
-
-
-### 4.3 Org Master Role (Account Discovery)
-
-**Role D: `system-config-report-generator-list-org-role**`
-
-* **Deployed to:** Organization Management Account.
-* **Trust Policy:** Allow Principal `arn:aws:iam::[HUB_ACCOUNT_ID]:role/system-config-report-scanner-role`
-* **Permissions:**
-* `organizations:ListAccounts`
+* `organizations:ListAccountsForParent`
 * `organizations:ListOrganizationalUnitsForParent`
 
 
+* **Trust Policy:** Allow `system-config-report-generator-write-role` to assume this.
 
----
+### Spoke Accounts (Targets)
 
-## 5. Implementation Plan
+* **Role Name:** `system-config-report-generator-read-role`
+* **Location:** All Target Accounts
+* **Permissions:** (Read-only access for auditing)
+* `config:Describe*`, `config:Get*`
+* `ec2:Describe*`
+* `iam:List*`
+* `rds:Describe*`
+* `cloudfront:List*`
 
-1. **Terraform IAM (Spokes):** Update the baseline Terraform module to deploy `system-config-report-generator-read-role` to all member accounts.
-2. **Terraform IAM (Hub):** Deploy the Lambda roles and the S3 Bucket (`sys-compliance-reports-{env}`).
-3. **Develop Scraper:** Refactor local Python script to use `boto3.sts.assume_role` and `concurrent.futures`.
-4. **Develop Reporter:** Refactor Excel generation to read/write from memory streams (using `io.BytesIO`) instead of local disk.
-5. **Deploy:** Deploy Lambdas using Terraform/SAM.
-6. **Test:** Manually trigger the Scanner Lambda and verify the Excel file appears in S3.
 
----
-
-### Key Improvements in this Version:
-
-1. **Separated Scanning from Reporting:** This is the most important architectural change. It ensures that if the Excel generation is heavy, it doesn't eat into the time allocated for scanning AWS APIs.
-2. **Scalability Math:** Added section 3 to defend the decision to use Lambda against the "15-minute" fear.
-3. **Simplified IAM:** Grouped the roles logically by "Hub" vs "Spoke".
+* **Trust Policy:** Allow `system-config-report-generator-write-role` from the Hub account to assume this.
