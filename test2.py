@@ -1,56 +1,93 @@
+import sys
 import logging
-from lib import k8s, route53, external_dns, utils, config
+import datetime
+import os
+import boto3
+import concurrent.futures
 
-logger = logging.getLogger(__name__)
+# Import your existing logic (assuming you keep the models folder)
+from models.account import Account
+from aws_utils import get_all_accounts_with_ou  # The file we just created above
 
-def execute_full_verification() -> bool:
-    logger.info("Initializing clients...")
-    k8s_clients = k8s.initialize_clients()
-    route53_client = route53.initialize_client()
+# Configure Logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+S3_BUCKET = os.environ.get('S3_BUCKET', 'my-compliance-bucket-name')
+
+def safe_check_compliance(account_data):
+    """
+    Wrapper to run compliance checks and handle errors.
+    """
+    # Initialize your existing Account object
+    # NOTE: You must update Account.__init__ to NOT require 'aws_profile' anymore
+    acc = Account(
+        acc_id=account_data['Id'],
+        acc_name=account_data['Name'],
+        organizational_unit=account_data['OU']
+    )
     
-    # ---------------------------------------------------------
-    # GLOBAL SAFETY NET:
-    # All resources created in this block are destroyed when it exits.
-    # ---------------------------------------------------------
-    with k8s.infrastructure_manager(k8s_clients, config.TEST_NAMESPACE, cleanup=True):
+    try:
+        # Run the check (This calls the refactored logic in account.py)
+        # Ensure account.py now uses get_assumed_session() instead of self.aws_profile
+        acc.check_compliance() 
         
-        # 1. Discovery (Find what to test)
-        try:
-            ext_dns_config = external_dns.get_config(k8s_clients)
-            active_sources = [s for s in ext_dns_config.sources if s in config.SOURCE_MANIFESTS_MAP]
+        if not acc.config_rules:
+            # Matches your existing logic for "skipped"
+            return (False, acc, "No config rules found")
             
-            if not active_sources:
-                logger.error("No testable sources detected!")
-                return False
+        return (True, acc)
+        
+    except Exception as e:
+        return (False, acc, str(e))
 
-            failed_sources = []
-            
-            # 2. Run All Tests
-            for source in active_sources:
-                logger.info(f"--- Running Test: {source} ---")
-                try:
-                    utils.run_test_suite(
-                        source_name=source,
-                        manifest_path=config.SOURCE_MANIFESTS_MAP[source],
-                        k8s_clients=k8s_clients,
-                        route53_client=route53_client,
-                        zone_id=route53.get_hosted_zone_id(route53_client, ext_dns_config.private_zone),
-                        external_mode=ext_dns_config.mode,
-                        test_namespace=config.TEST_NAMESPACE # Pass the global NS
-                    )
-                except Exception as e:
-                    logger.error(f"Test failed for source '{source}': {e}")
-                    failed_sources.append(source)
-            
-            # 3. Report Results
-            if failed_sources:
-                logger.error(f"Failed sources: {failed_sources}")
-                return False
-                
-            return True
-
-        except Exception as e:
-            logger.exception("Unexpected error during verification logic")
-            return False
+def lambda_handler(event, context):
+    logger.info("Fetching accounts from AWS Organizations...")
     
-    # At this point, the 'with' block has exited, and the Namespace is DELETED.
+    # 1. Get Accounts (No more Orgmaster class needed)
+    raw_accounts = get_all_accounts_with_ou()
+    logger.info(f"Discovered {len(raw_accounts)} accounts.")
+
+    results = []
+    
+    # 2. Run in Parallel (Replaces pathos ProcessPool)
+    # Lambda handles threads well. max_workers=20 is usually safe.
+    logger.info("Checking compliance in parallel...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        future_to_acc = {executor.submit(safe_check_compliance, acc): acc for acc in raw_accounts}
+        
+        for future in concurrent.futures.as_completed(future_to_acc):
+            results.append(future.result())
+
+    # 3. Process Results
+    successes = [r[1] for r in results if r[0]]
+    failures = [r for r in results if not r[0]]
+    
+    logger.info(f"Success: {len(successes)}, Skipped/Failed: {len(failures)}")
+
+    # 4. Write CSV to /tmp (Lambda's only writable disk space)
+    filename = f"ConfigRule_{datetime.date.today().strftime('%Y-%m-%d')}.csv"
+    local_path = f"/tmp/{filename}"
+    
+    headers = [
+        'ConfigRule', 'Active', 'Classification', 'ComplianceType', 'AccountAlias',
+        'AwsRegion', 'ResourceType', 'ResourceIdentifier', 'Description', 'Annotation',
+        'EvaluationTimestamp', 'EvaluationTriggerType', 'AccountId', 'OU',
+        'Tag:Name', 'Tag:Application', 'Tag:Owner', 'Tag:Environment'
+    ]
+    
+    # (Simplified CSV writing logic for brevity - paste your actual writing logic here)
+    with open(local_path, 'w', encoding='utf-8') as f:
+        f.write(','.join(headers) + '\n')
+        for account in successes:
+            for rule in account.config_rules:
+                 # ... Add your existing CSV row formatting here ...
+                 f.write(f"{rule}\n") # Assuming __str__ handles the formatting
+
+    # 5. Upload to S3
+    s3 = boto3.client('s3')
+    s3_key = f"reports/{filename}"
+    s3.upload_file(local_path, S3_BUCKET, s3_key)
+    logger.info(f"Report uploaded to s3://{S3_BUCKET}/{s3_key}")
+    
+    return {"status": "success", "s3_key": s3_key}

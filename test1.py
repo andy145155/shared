@@ -1,73 +1,62 @@
-# config.py
-import os
+import boto3
+from botocore.exceptions import ClientError
 
-class Config:
-    # AWS Settings
-    REGIONS = os.getenv("TARGET_REGIONS", "us-east-1,ap-east-1").split(",")
+# Constants
+ROLE_TO_ASSUME = "OrganizationAccountAccessRole"  # Ensure this role exists in target accounts
+ROOT_ID = "r-u5jv"  # From your orgmaster.py
+
+def get_assumed_session(account_id, region="us-east-1"):
+    """
+    Returns a boto3 Session authenticated into the target account using IAM Roles.
+    """
+    sts = boto3.client('sts')
+    role_arn = f"arn:aws:iam::{account_id}:role/{ROLE_TO_ASSUME}"
     
-    # Logic: Regions to skip for specific account patterns
-    REGION_EXCLUSIONS = {
-        "ap-east-1": ["secondary"] # Skip ap-east-1 if account name contains 'secondary'
-    }
+    try:
+        response = sts.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName="ComplianceLambdaSession"
+        )
+        creds = response['Credentials']
+        return boto3.Session(
+            aws_access_key_id=creds['AccessKeyId'],
+            aws_secret_access_key=creds['SecretAccessKey'],
+            aws_session_token=creds['SessionToken'],
+            region_name=region
+        )
+    except ClientError as e:
+        print(f"ERROR: Could not assume role in {account_id}: {e}")
+        return None
 
-    # Reporting Settings
-    ENV_IDENTIFIERS = {
-        "prod": ["prod", "production", "pr-"],
-        "stg": ["stg", "staging"],
-        "dev": ["dev", "development"]
-    }
-
-
-from config import Config
-
-class Account:
-    def __init__(self, acc_id, acc_name, organizational_unit, session):
-        self.acc_id = acc_id
-        self.acc_name = acc_name
-        # ... (rest of init)
-
-    def _should_scan_region(self, region):
-        """Centralized logic to decide if a region should be scanned."""
-        exclusions = Config.REGION_EXCLUSIONS.get(region, [])
-        for keyword in exclusions:
-            if keyword in self.acc_name.lower():
-                return False
-        return True
-
-    def check_compliance(self):
-        for region in Config.REGIONS:
-            if not self._should_scan_region(region):
-                continue
-            
-            try:
-                self.generate_result(region)
-            except Exception as e:
-                logging.error(f"Failed to scan {self.acc_name} in {region}: {e}")
-
-class ConfigRule:
-    def set_tags(self, tags):
-        # Priority list: Look for 'mox.application', then 'Application', then 'App'
-        tag_map = {k['Key']: k['Value'] for k in tags}
+def get_all_accounts_with_ou():
+    """
+    Traverses AWS Organizations to find all active accounts and their OUs.
+    Replaces Orgmaster.get_accounts()
+    """
+    org = boto3.client('organizations')
+    accounts_list = []
+    
+    # 1. Get all OUs under the root
+    # Note: If you have nested OUs (OUs inside OUs), you might need a recursive function here.
+    # For now, this matches your orgmaster.py logic (single level under root).
+    paginator = org.get_paginator('list_organizational_units_for_parent')
+    ous = []
+    for page in paginator.paginate(ParentId=ROOT_ID):
+        ous.extend(page['OrganizationalUnits'])
         
-        self.tags['Application'] = self._find_tag_value(tag_map, ['mox.application', 'Application', 'App'])
-        self.tags['Owner'] = self._find_tag_value(tag_map, ['mox.owner', 'Owner', 'Team'])
-        self.tags['Environment'] = self._find_tag_value(tag_map, ['mox.environment', 'Environment', 'Env'])
-
-    def _find_tag_value(self, tag_map, keys_to_check):
-        """Returns the first matching value from a list of possible keys."""
-        for key in keys_to_check:
-            if key in tag_map:
-                return tag_map[key]
-        return "UNSUPPORTED"
-
-# In generate_report.py
-
-# CHANGE: Use 'num' (number) instead of 'percentile' for absolute thresholds.
-# Example: 0-80 is RED, 80-100 is GREEN (or however you define your gradient)
-ws.conditional_formatting.add(f'D1:D{max_row}',
-    ColorScaleRule(
-        start_type='num', start_value=50, start_color=color_red,
-        mid_type='num', mid_value=80, mid_color=color_yellow,
-        end_type='num', end_value=100, end_color=color_green
-    )
-)
+    # 2. For each OU, get the accounts
+    for ou in ous:
+        ou_id = ou['Id']
+        ou_name = ou['Name']
+        
+        acc_paginator = org.get_paginator('list_accounts_for_parent')
+        for page in acc_paginator.paginate(ParentId=ou_id):
+            for acc in page['Accounts']:
+                if acc['Status'] == 'ACTIVE':
+                    accounts_list.append({
+                        'Id': acc['Id'],
+                        'Name': acc['Name'],
+                        'OU': ou_name
+                    })
+                    
+    return accounts_list
