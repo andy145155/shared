@@ -49,3 +49,27 @@ These items are not blockers for the MVP but are highly recommended to improve o
 | **Integration** | **Automated Jira Ticketing**<br>Automatically create a Jira ticket in the Platform board with the S3 link to the report attached. | Ensures the report is actually reviewed and actioned; provides an audit trail of "Review". | **Jira API:** Python script POSTs to Jira API upon successful S3 upload. |
 | **Observability**| **Real-time Alerting**<br>Trigger a Slack/Teams notification immediately if the Job fails or if the account discovery process returns 0 accounts. | Reduces "Silent Failures" where the report simply doesn't appear and no one notices for weeks. | **Slack Webhook:** `requests.post(slack_url)` in the `except` block of the main script. |
 | **Data** | **Trend Analysis (Historical)**<br>Append summary statistics (e.g., "Total Non-Compliant Resources") to a secondary "History" CSV/Database. | Allows the team to visualize if compliance is improving or degrading over time. | **DynamoDB / S3 Append:** Write a small JSON summary to a separate location for dashboarding. |
+
+
+
+# 1. Requirements Definition
+
+## Mandatory Capabilities & Metrics
+The following table defines the mandatory elements for the AWS Config Compliance automation project.
+
+| **Category** | **Requirement** | **Metric / Verification** | **Target Implementation** | **Current State** |
+| :--- | :--- | :--- | :--- | :--- |
+| **Automation** | **Zero-Touch Execution**<br>The system must generate and deliver the report automatically on a scheduled basis without human intervention. | • **Frequency:** Weekly (Mon 09:00 HKT)<br>• **Manual Steps:** 0 | **Kubernetes CronJob** triggered by cluster schedule. Report output is automatically uploaded to S3. | **Manual:** Engineer runs Python script locally on laptop. |
+| **Performance** | **Execution Duration**<br>The solution must support long-running processes that exceed AWS Lambda's hard limits to accommodate future growth. | • **Max Duration:** > 15 minutes<br>• **Account Capacity:** Support 500+ accounts | **Containerized Workload (Pod)** running on EKS. No hard timeout limits applied to the process. | **Limited:** Local script runs until finished, but migrating to standard Lambda would impose a 15-min cap. |
+| **Security** | **Identity Management**<br>Eliminate long-lived access keys in the cloud environment. Use temporary, rotated credentials for all API access. | • **Creds Type:** STS Temporary Tokens<br>• **Long-lived Keys on Disk:** 0 | **IRSA (IAM Roles for Service Accounts):** Pod authenticates via OIDC. Hub-and-Spoke role assumption. | **Risk:** Relies on `aws-okta` and local `~/.aws/credentials` files on user laptops. |
+| **Observability**| **Datadog Monitoring & Alerting**<br>The system must emit structured logs to Datadog. A Monitor must be configured to trigger a Slack alert immediately upon job failure. | • **Alert Latency:** < 5 mins after failure<br>• **Channel:** Team Slack (e.g., `#platform-alerts`) | **Datadog Monitor:** Querying K8s Job status (`kubernetes.job.failed`).<br>**Notification:** Datadog `@slack-[channel]` integration. | **None:** Failures are silent; no one knows if the script crashes unless they manually check. |
+| **Output** | **Report Integrity**<br>The output must match the current Excel format exactly, including conditional formatting and tab structure. | • **Format:** `.xlsx`<br>• **Accuracy:** 100% match with legacy script | **Python Pandas/OpenPyXL:** Logic ported to container to generate identical binary Excel file in memory. | **Manual:** Script generates file locally; engineer manually uploads or shares it. |
+| **Dev Experience**| **Local Debugging Support**<br>The script must support execution on local engineering laptops to facilitate debugging and feature development without requiring a cluster deployment. | • **Env Support:** MacOS/Linux<br>• **Auth Fallback:** Successfully detects and uses local `~/.aws/credentials` if IRSA is absent. | **Hybrid Auth Logic:** Code implements `try: IRSA except: LocalProfile` logic to handle both environments seamlessy. | **Local Only:** Script currently *only* works locally and fails in cloud environments. |
+
+## Recommended "Good-to-Have" Requirements
+These items are not blockers for the MVP but are highly recommended to improve operational maturity.
+
+| **Category** | **Requirement** | **Benefit** | **Target Implementation** |
+| :--- | :--- | :--- | :--- |
+| **Integration** | **Automated Jira Ticketing**<br>Automatically create a Jira ticket in the Platform board with the S3 link to the report attached. | Ensures the report is actually reviewed and actioned; provides an audit trail of "Review". | **Jira API:** Python script POSTs to Jira API upon successful S3 upload. |
+| **Data** | **Trend Analysis (Historical)**<br>Append summary statistics (e.g., "Total Non-Compliant Resources") to a secondary "History" CSV/Database. | Allows the team to visualize if compliance is improving or degrading over time. | **DynamoDB / S3 Append:** Write a small JSON summary to a separate location for dashboarding. |
