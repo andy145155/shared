@@ -1,193 +1,126 @@
-This is a smart move. Splitting the documentation ensures clarity: the **Requirements** stay static, the **Decision Log** preserves the "why" for future engineers, and the **Design/Implementation** docs become the active technical references for the Kubernetes approach.
+Here is a significantly more detailed **System Design** document for the Kubernetes approach. I have expanded it to include component-level specifications, the exact authentication flow (IRSA), failure handling, and observability strategies.
 
-Here are your four distinct documents.
-
-### Document 1: Requirements Definition
-
-**Purpose:** Defines the business problem and success criteria.
+You can replace the previous "Document 3" with this version.
 
 ---
 
-# Requirements: AWS Config Compliance Automation
-
-## 1. Problem Statement
-
-The Platform Engineering team currently executes a manual, local Python script to generate weekly AWS Config compliance reports. This process is inefficient because:
-
-* **Manual Effort:** It consumes engineering time every week.
-* **Security Risk:** It relies on local credentials (`aws-okta`) which is not a best practice for automated tasks.
-* **Lack of Auditability:** There is no centralized log of execution or report generation.
-
-## 2. Business Goals
-
-* **Automation:** The report generation must run automatically every Monday morning without human intervention.
-* **Integration:** The system must generate an Excel report (`.xlsx`) and ideally create a Jira ticket for tracking.
-* **Scalability:** The solution must support hundreds of AWS accounts without timing out or requiring manual batching.
-
-## 3. Technical Requirements
-
-* **Hub-and-Spoke Security:** A central security account (`*-sec-control`) must act as the "Hub" to scan all "Spoke" accounts.
-* **Least Privilege:** Access must be granted via IAM Roles, not long-lived user access keys.
-* **Cost Efficiency:** The solution should leverage existing infrastructure where possible to minimize additional costs.
-
----
-
-### Document 2: Decision Log (ADR)
-
-**Purpose:** Records the architectural options considered and justifies the final choice.
-
----
-
-# Architecture Decision Record (ADR): Compliance Reporting Engine
-
-## 1. Context
-
-We need a compute platform to run the compliance Python script. The script makes API calls to hundreds of accounts, which is an I/O-bound task that can exceed 15 minutes as the organization grows.
-
-## 2. Options Evaluated
-
-| Option | Description | Pros | Cons |
-| --- | --- | --- | --- |
-| **1. Lambda Sharding** | Trigger multiple Lambdas with different "shards" of the account list. | Bypasses timeout. | High complexity (merging results). Brittle logic. |
-| **2. Multi-threaded Lambda** | Single Lambda using python threading. | Simple setup. Low cost. | **Hard limit of 15 mins.** Risk of future failure as account count grows. |
-| **3. Step Functions** | Distributed Map state triggers one Lambda per account. | Infinite scale. | Higher complexity. Higher cost due to state transitions. |
-| **4. Fargate Task** | Run container as a standalone task. | No timeouts. | Slow startup. Higher cost per execution. |
-| **5. Kubernetes CronJob** | Schedule a Pod on existing EKS clusters (`cybsecops-cluster`). | **No timeouts.** Uses existing compute (sunk cost). | Requires Docker build pipeline and IRSA setup. |
-
-## 3. Decision
-
-**We define the architecture using Option 5: Kubernetes CronJob.**
-
-## 4. Rationale
-
-While Multi-threaded Lambda (Option 2) is simpler for an MVP, we are selecting **Kubernetes** because:
-
-1. **Zero Timeout Risk:** Unlike Lambda, a Pod can run for hours if necessary, future-proofing us against organization growth.
-2. **Existing Investment:** We already operate `ptdev-cybsecops-cluster`. Running this as a CronJob consumes spare capacity we are already paying for.
-3. **Security Standard:** We can utilize **IRSA (IAM Roles for Service Accounts)**, which is the team's standard for workload identity, avoiding the need to manage Lambda execution roles separately.
-
----
-
-### Document 3: System Design
-
-**Purpose:** Technical specification of the Kubernetes solution.
-
----
-
-# System Design: AWS Config Report (Kubernetes)
+# System Design: AWS Config Compliance Report (Kubernetes)
 
 ## 1. High-Level Architecture
 
-The system runs as a containerized **CronJob** inside the `ptdev/prod-cybsecops-cluster` EKS cluster.
+The system is designed as a **cloud-native, scheduled batch job** running on Amazon EKS. It utilizes the "Hub-and-Spoke" security pattern, where the EKS cluster (Hub) assumes authority to audit all Organization accounts (Spokes).
 
-* **Namespace:** `security-compliance` (or `aws-config-report-automation`).
-* **Schedule:** Weekly (e.g., `0 9 * * 1`).
-* **Identity:** The Pod uses a Kubernetes ServiceAccount annotated with an AWS IAM Role ARN (IRSA).
+### Core Components
 
-## 2. IAM Security Model (Hub & Spoke)
+* **Orchestrator:** Kubernetes `CronJob` resource controller.
+* **Runtime:** Docker container (Python 3.11 slim) running the compliance scanner script.
+* **Identity Provider:** AWS IAM OIDC Provider linked to the EKS cluster (IRSA).
+* **Storage:** Amazon S3 for report retention (Audit trail).
 
-We utilize a **Hub-and-Spoke** pattern where the EKS cluster acts as the Hub.
+## 2. Component Specifications
 
-### A. Hub Account (`*-sec-control`)
+### A. Kubernetes Resources
 
-* **Identity:** `system-config-report-generator-write-role`
-* **Type:** IAM Role for Service Accounts (IRSA).
-* **Trust Policy:** Trusts the EKS Cluster's OIDC Provider (Federated identity), *not* `lambda.amazonaws.com`.
-* **Permissions:**
-* `sts:AssumeRole`: Allowed to assume the "Read Role" in spoke accounts.
-* `s3:PutObject`: Allowed to upload reports to the S3 bucket.
+We will deploy the following resources into the `security-compliance` namespace:
 
+| Resource | Name | Purpose | Configuration Details |
+| --- | --- | --- | --- |
+| **Namespace** | `security-compliance` | Isolation | Network Policies to deny ingress; Egress allowed to AWS APIs only. |
+| **ServiceAccount** | `report-generator-sa` | Identity | **Crucial:** Must have annotation `eks.amazonaws.com/role-arn: arn:aws:iam::[HUB-ID]:role/system-config-report-generator-write-role`. |
+| **CronJob** | `aws-config-compliance-audit` | Scheduling | **Schedule:** `0 9 * * 1` (Mon 9AM HKT).<br>
 
+<br>**ConcurrencyPolicy:** `Forbid` (Prevents overlapping runs).<br>
 
-### B. Spoke Accounts (Target Accounts)
+<br>**SuccessfulJobsHistoryLimit:** 3 (Keep logs of recent successes). |
+| **ConfigMap** | `compliance-config` | Config | Stores non-sensitive settings: `IGNORED_OUS`, `IGNORED_ACCOUNTS`, `S3_BUCKET_NAME`. |
+| **Secret** | `compliance-secrets` | Credentials | (Optional) Stores Jira API Token if ticket creation is enabled. |
 
-* **Identity:** `system-config-report-generator-read-role`
-* **Type:** Cross-Account Role.
-* **Trust Policy:** Allows `arn:aws:iam::[HUB-ACCOUNT-ID]:role/system-config-report-generator-write-role` to assume it.
-* **Permissions:** Read-only access to AWS Config, EC2, IAM, and RDS metadata.
+### B. Compute Resources (Pod Spec)
 
-### C. Org Master Account
+To ensure the job runs reliably without starving other cluster workloads:
 
-* **Identity:** `system-config-report-generator-list-org-role`
-* **Purpose:** Allows the script to discover all active account IDs dynamically.
+* **Requests:** `cpu: "500m"`, `memory: "512Mi"` (Guaranteed capacity).
+* **Limits:** `cpu: "1000m"`, `memory: "1Gi"` (Burstable ceiling).
+* **RestartPolicy:** `OnFailure` (K8s will retry the pod if the script crashes due to transient network errors).
+* **BackoffLimit:** `3` (Max 3 retries before marking the Job as "Failed" to prevent infinite crash loops).
 
-## 3. Data Flow
+## 3. Authentication & Security Design (IRSA Flow)
 
-1. **Trigger:** K8s CronJob spawns a Pod.
-2. **Auth:** Pod authenticates via OIDC and receives temporary AWS credentials for the *Hub Role*.
-3. **Discovery:** Script assumes the *Org Master Role* to fetch the list of all active accounts.
-4. **Scan:** Script iterates through accounts, assuming the *Spoke Read Role* in each one to fetch compliance data.
-5. **Output:** Script generates `.xlsx` in memory and uploads it directly to the S3 Bucket.
+We strictly avoid hardcoded AWS credentials (AK/SK). Instead, we use **IAM Roles for Service Accounts (IRSA)**.
 
----
+**The Handshake Flow:**
 
-### Document 4: Implementation Plan
+1. **Pod Startup:** The K8s Pod starts. The Amazon EKS Pod Identity Webhook injects a token file (JWT) into the container at `/var/run/secrets/eks.amazonaws.com/serviceaccount/token`.
+2. **Assume Role:** The Python script (using `boto3`) calls `sts:AssumeRoleWithWebIdentity`.
+3. **Verification:** AWS STS validates the JWT signature against the cluster's OIDC provider.
+4. **Credential Vending:** STS returns temporary AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`) for the Hub Role (`system-config-report-generator-write-role`).
+5. **Cross-Account Access:** Using these Hub credentials, the script then calls `sts:AssumeRole` to access the target "Spoke" roles (`system-config-report-generator-read-role`).
 
-**Purpose:** Step-by-step engineering guide.
+## 4. Application Logic Flow
 
----
+The Python application logic has been refactored for the containerized environment:
 
-# Implementation Plan
-
-## Phase 1: IAM Deployment (Terraform)
-
-*Before deploying code, we must establish the identity web.*
-
-1. **Define Spoke Roles (Read-Only)**
-* **Repo:** `ProjectDrgn/terraform-infrastructure-skeleton` path `/common/baseline/global`.
-* **Action:** Add `system-config-report-generator-read-role` module. Ensure Trust Policy allows the Hub Account ID.
-* **Promote:** `ptdev` -> `stg` -> `prod`.
+1. **Initialization:**
+* Load config from Environment Variables (populated by ConfigMap).
+* Initialize `boto3` session using IRSA.
 
 
-2. **Define Org Discovery Role**
-* **Repo:** `ProjectDrgn/terraform-infra-orgmaster`.
-* **Action:** Deploy `system-config-report-generator-list-org-role`.
+2. **Discovery (Org Master):**
+* Assume `list-org-role` in the Org Master account.
+* Fetch all active account IDs, filtering out `IGNORED_ACCOUNTS`.
 
 
-3. **Define Hub Role (IRSA)**
-* **Repo:** `ProjectDrgn/terraform-infra-security-control`.
-* **Action:** Create `system-config-report-generator-write-role`.
-* **Critical:** The Trust Policy must specify the `Condition` for the specific ServiceAccount namespace and name:
-```json
-"StringEquals": {
-  "oidc.eks...:sub": "system:serviceaccount:security-compliance:report-generator-sa"
-}
-
-```
+3. **Parallel Execution (The "Workhorse"):**
+* Use `concurrent.futures.ThreadPoolExecutor` (Max Workers: 20).
+* **Per Thread:**
+* Assume `read-role` in Target Account .
+* Pull AWS Config compliance data.
+* *Error Handling:* If an account fails (e.g., role missing), log the error but **do not crash** the main process. Record as "Skipped".
 
 
 
 
-
-## Phase 2: Containerization
-
-1. **Dockerize Script:**
-* Create `Dockerfile` in the script repository.
-* Base image: `python:3.11-slim`.
-* Install dependencies: `boto3`, `pandas`, `openpyxl`.
-* Entrypoint: `["python", "main.py"]`.
+4. **Aggregation & Reporting:**
+* Aggregate results in memory.
+* Generate `.xlsx` using `pandas`.
+* Upload to S3: `s3://[BUCKET]/reports/ConfigRule_YYYY-MM-DD.xlsx`.
 
 
-2. **Build & Push:**
-* Build image and push to your internal ECR (Elastic Container Registry).
+5. **Termination:**
+* Exit with Code 0 (Success) or Code 1 (Failure if critical threshold met).
 
 
 
-## Phase 3: Kubernetes Deployment
+## 5. Observability & Monitoring
 
-1. **Create Manifests (Helm Chart):**
-* **Namespace:** `security-compliance`
-* **ServiceAccount:** `report-generator-sa` (Annotate with Hub Role ARN).
-* **CronJob:** Schedule the container image. Set resources (e.g., `requests: cpu: 500m, memory: 512Mi`).
+### Logging Strategy
+
+* **Format:** JSON (Structured logging).
+* **Output:** `stdout` / `stderr`.
+* **Ingestion:** Fluentbit (DaemonSet) -> Datadog/Splunk.
+* **Log Levels:**
+* `INFO`: "Scanned account 123456789 successfully."
+* `WARN`: "Account 987654321 skipped (Role not found)."
+* `ERROR`: "Critical failure: S3 bucket not accessible."
 
 
-2. **Deploy:**
-* Apply manifests to `ptdev-cybsecops-cluster` first for validation.
 
+### Alerting (Prometheus/Datadog)
 
+We will monitor the Kubernetes Job status.
 
-## Phase 4: Validation
+* **Metric:** `kube_job_status_failed`
+* **Alert Rule:** If `kube_job_status_failed > 0` for namespace `security-compliance`, page the Platform Team.
+* **SLA:** Investigation within 24 hours (since report is weekly).
 
-1. **Dry Run:** Trigger the CronJob manually (`kubectl create job --from=cronjob/...`).
-2. **Check Logs:** `kubectl logs -f job/...` to verify role assumption logic.
-3. **Verify Output:** Check S3 bucket for the generated Excel report.
+## 6. Network Requirements
+
+The EKS Worker Nodes must have egress access to the following AWS Public Endpoints (via NAT Gateway):
+
+1. `sts.amazonaws.com` (Authentication)
+2. `organizations.amazonaws.com` (Account Discovery)
+3. `config.amazonaws.com` (Compliance Data)
+4. `s3.amazonaws.com` (Report Upload)
+5. `ec2/iam/rds/etc` (Resource metadata)
+
+*Note: No Ingress ports need to be opened.*
