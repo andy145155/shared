@@ -1,124 +1,111 @@
-This is a much better way to document the security model for engineering teams. It acts as a clear "build spec" for whoever writes the Terraform.
+This is a refined **Implementation Plan** that incorporates the specific repository paths, ArgoCD workflows, and the Kubernetes/IRSA details from your screenshots.
 
-Here is the replacement section. You can swap out **Section 3: Authentication & Security Design** in the System Design document with this detailed specification.
-
----
-
-## 3. IAM & IRSA Configuration Specification
-
-This section details the specific Identity and Access Management (IAM) resources required. The architecture follows a Hub-and-Spoke model where the Kubernetes Service Account (in the Hub) assumes roles in the target accounts (Spokes).
-
-### A. Hub Account Resources (IRSA Identity)
-
-*These resources are deployed in the Security Control Account (Hub) where the EKS cluster resides.*
-
-#### 1. Kubernetes Service Account (The "Trigger")
-
-* **Resource Type:** Kubernetes Manifest
-* **Location:** EKS Cluster (Namespace: `security-compliance`)
-* **Name:** `report-generator-sa`
-* **Configuration:** Must include the annotation mapping it to the IAM Role.
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: report-generator-sa
-  namespace: security-compliance
-  annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::[HUB_ACCOUNT_ID]:role/system-config-report-generator-write-role
-
-```
-
-
-
-#### 2. IRSA IAM Role (The "Hub Identity")
-
-* **Resource Type:** AWS IAM Role
-* **Location:** Hub Account (`ptdev-sec-control` / `prod-sec-control`)
-* **Role Name:** `system-config-report-generator-write-role`
-* **Trust Policy (Principal):** Federated OIDC (Not Lambda, Not EC2).
-```json
-{
-  "Effect": "Allow",
-  "Principal": {
-    "Federated": "arn:aws:iam::[HUB_ACCOUNT_ID]:oidc-provider/[EKS_OIDC_ID]"
-  },
-  "Action": "sts:AssumeRoleWithWebIdentity",
-  "Condition": {
-    "StringEquals": {
-      "[EKS_OIDC_ID]:sub": "system:serviceaccount:security-compliance:report-generator-sa"
-    }
-  }
-}
-
-```
-
-
-* **Permissions Policy:**
-* **Action:** `sts:AssumeRole`
-* **Resource:** `arn:aws:iam::*:role/system-config-report-generator-read-role` (Wildcard allows assuming the role in *any* spoke account).
-* **Action:** `s3:PutObject`, `s3:GetBucketLocation`
-* **Resource:** `arn:aws:s3:::s3-config-compliance-reports/*`
-
-
+You can replace your current "Implementation Steps" section with this structured plan.
 
 ---
 
-### B. Spoke Account Resources (Target Access)
+# Implementation Plan
 
-*These resources are deployed in EVERY AWS account that needs to be audited.*
+## Phase 1: IAM Foundation (Terraform)
 
-#### 3. Cross-Account Read Role (The "Spoke Identity")
+*Objective: Establish the "identity web" required for the Hub-and-Spoke model before any code runs.*
 
-* **Resource Type:** AWS IAM Role
-* **Location:** All Target Accounts (Spokes)
-* **Role Name:** `system-config-report-generator-read-role`
-* **Trust Policy (Principal):** The Hub Account's Role.
-```json
-{
-  "Effect": "Allow",
-  "Principal": {
-    "AWS": "arn:aws:iam::[HUB_ACCOUNT_ID]:role/system-config-report-generator-write-role"
-  },
-  "Action": "sts:AssumeRole"
-}
+**1. Define Spoke Roles (Read-Only Targets)**
 
-```
+* **Action:** Define the `system-config-report-generator-read-role` IAM policy.
+* **Repository:** `ProjectDrgn/terraform-aws-iam-roles`
+* **Implementation:** Update the global baseline module to deploy this role to **all** member accounts.
+* **Repository:** `ProjectDrgn/terraform-infrastructure-skeleton`
+* *Path:* `/common/baseline/global`
 
 
-* **Permissions Policy:** (Read-Only Audit Access)
-* **Config:** `config:DescribeConfigRules`, `config:DescribeConfigurationRecorders`, `config:GetComplianceDetailsByConfigRule`
-* **EC2:** `ec2:DescribeInstances`, `ec2:DescribeSecurityGroups`, `ec2:DescribeSubnets`, `ec2:DescribeVpcs`, `ec2:DescribeTags`
-* **IAM:** `iam:ListRoles`, `iam:ListUsers`, `iam:ListPolicies`
-* **RDS:** `rds:DescribeDBClusters`, `rds:DescribeDBInstances`
-* **CloudFront:** `cloudfront:ListDistributions`
-* **API Gateway:** `apigateway:GET`
+* **Promotion Strategy:** `ptdev` → `dev` → `stg` → `prod`
+
+**2. Define Org Discovery Role (Org Master)**
+
+* **Action:** Deploy the `system-config-report-generator-list-org-role` to the Organization Management account.
+* **Repository:** `ProjectDrgn/terraform-infra-orgmaster`
+* *Path:* `/tree/master/main`
+
+
+* **Detail:** Ensure the Trust Policy allows the `sec-control` (Hub) account to assume this role.
+
+**3. Define Hub Resources (IRSA & S3)**
+
+* **Action:** Provision the S3 Bucket and the **IAM Role for Service Accounts (IRSA)** in the Security Control account.
+* **Repository:** `ProjectDrgn/terraform-infrastructure-skeleton`
+* *Path:* `/sec-control/eks/workers` (or equivalent EKS IAM module path)
+
+
+* **Detail:**
+* Create IAM Role `system-config-report-generator-write-role`.
+* Configure Trust Relationship to trust the `cybsecops` EKS OIDC provider (specifically for the `security-compliance` namespace).
+
+
+* **Promotion Strategy:** `ptdev` → `prod`
+
+---
+
+## Phase 2: Application Containerization
+
+*Objective: Convert the local Python script into a deployable Docker artifact.*
+
+**4. Refactor & Dockerize**
+
+* **Action:** Move the Python logic (refactored for K8s) into the platform automation repo and add a `Dockerfile`.
+* **Repository:** `ProjectDrgn/platform-automation`
+* **Tasks:**
+* Add `aws_utils.py` (IRSA logic) and `main.py` (Threaded scanner).
+* Create `Dockerfile` (Base: `python:3.11-slim`).
+* Setup GitHub Actions/Jenkins to build and push the image to ECR.
 
 
 
 ---
 
-### C. Organization Management Resources (Discovery)
+## Phase 3: Kubernetes Deployment (ArgoCD)
 
-*These resources are deployed ONLY in the Organization Management Account (Root).*
+*Objective: Schedule the workload on the EKS cluster.*
 
-#### 4. Org Discovery Role
+**5. Deploy Manifests via ArgoCD**
 
-* **Resource Type:** AWS IAM Role
-* **Location:** Organization Management Account (`root-org-master`)
-* **Role Name:** `system-config-report-generator-list-org-role`
-* **Trust Policy (Principal):** The Hub Account's Role.
-```json
-{
-  "Effect": "Allow",
-  "Principal": {
-    "AWS": "arn:aws:iam::[HUB_ACCOUNT_ID]:role/system-config-report-generator-write-role"
-  },
-  "Action": "sts:AssumeRole"
-}
+* **Action:** Create the Kubernetes manifests (CronJob, ServiceAccount, ConfigMap) for the application.
+* **Repository:** `ProjectDrgn/argocd-apps`
+* *Path:* `/clusters/cybsecops/templates` (or create a new app folder `aws-config-compliance`)
+
+
+* **Manifest Details:**
+* **ServiceAccount:** Annotate with `eks.amazonaws.com/role-arn: ...write-role`.
+* **CronJob:** Schedule: `0 9 * * 1` (Weekly). Image: Pull from ECR.
+
+
+* **Deployment:** Commit changes to trigger ArgoCD sync to the `cybsecops` cluster.
+
+---
+
+## Phase 4: Validation & Cutover
+
+*Objective: Verify the system works end-to-end.*
+
+**6. Verification**
+
+* **Dry Run:** Manually create a Job from the CronJob:
+```bash
+kubectl create job --from=cronjob/aws-config-compliance manual-test -n security-compliance
 
 ```
 
 
-* **Permissions Policy:**
-* **Organizations:** `organizations:ListAccountsForParent`, `organizations:ListOrganizationalUnitsForParent`
+* **Logs:** Verify IAM assumption logic:
+```bash
+kubectl logs job/manual-test -n security-compliance -f
+
+```
+
+
+* **Artifact:** Confirm the `.xlsx` report appears in the S3 bucket.
+
+**7. Go Live**
+
+* Disable the legacy local script.
+* Notify stakeholders that reports are now automated via Kubernetes.
