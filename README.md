@@ -1,100 +1,27 @@
-Here is a system design level README for your repository. It focuses on the architecture, data flow, and the "Map-Reduce" pattern your Lambda uses.
+# 1. Requirements Definition
+
+## Target Capabilities & Metrics
+The following table defines the mandatory elements for the AWS Config Compliance automation project, establishing concrete metrics for success.
+
+| **Category** | **Requirement** | **Metric / Verification** | **Target Implementation** | **Current State** |
+| :--- | :--- | :--- | :--- | :--- |
+| **Automation** | **Zero-Touch Execution**<br>The system must generate and deliver the report automatically on a scheduled basis without human intervention. | • **Frequency:** Weekly (Mon 09:00 HKT)<br>• **Manual Steps:** 0 | **Kubernetes CronJob** triggered by cluster schedule. Report output is automatically uploaded to S3. | **Manual:** Engineer runs Python script locally on laptop. |
+| **Performance** | **Execution Duration**<br>The solution must support long-running processes that exceed AWS Lambda's hard limits to accommodate future growth. | • **Max Duration:** > 15 minutes<br>• **Account Capacity:** Support 500+ accounts | **Containerized Workload (Pod)** running on EKS. No hard timeout limits applied to the process. | **Limited:** Local script runs until finished, but migrating to standard Lambda would impose a 15-min cap. |
+| **Security** | **Identity Management**<br>Eliminate long-lived access keys. Use temporary, rotated credentials for all API access. | • **Creds Type:** STS Temporary Tokens<br>• **Long-lived Keys on Disk:** 0 | **IRSA (IAM Roles for Service Accounts):** Pod authenticates via OIDC. Hub-and-Spoke role assumption for cross-account access. | **Risk:** Relies on `aws-okta` and local `~/.aws/credentials` files on user laptops. |
+| **Output** | **Report Integrity**<br>The output must match the current Excel format exactly, including conditional formatting and tab structure. | • **Format:** `.xlsx`<br>• **Accuracy:** 100% match with legacy script | **Python Pandas/OpenPyXL:** Logic ported to container to generate identical binary Excel file in memory. | **Manual:** Script generates file locally; engineer manually uploads or shares it. |
+| **Scalability** | **Concurrency**<br>The system must process accounts in parallel to ensure the report creates within a reasonable maintenance window. | • **Concurrency:** 20+ Threads<br>• **Total Runtime:** < 30 mins (Target) | **Multi-threading:** `concurrent.futures` implementation within the Python container. | **Serial:** Current script runs sequentially or with limited local parallelism. |
 
 ---
 
-# AWS Config Compliance Reporter
+# 2. Architecture Decision Record (ADR)
 
-## Overview
+## Options Evaluated & Decision Matrix
+We evaluated four options to host the compliance engine. **Option 5 (Kubernetes CronJob)** was selected to meet the specific requirement of supporting execution times > 15 minutes.
 
-This system is a serverless data pipeline designed to aggregate AWS Config compliance status across a multi-account organization. It fetches compliance rules from dispersed AWS accounts and consolidates them into a single, formatted Excel dashboard for security and operations teams.
-
-## Architecture
-
-The system utilizes a **serverless Map-Reduce architecture** orchestrated by AWS Lambda and S3. This design allows it to scale to hundreds of accounts without hitting Lambda timeout limits by splitting the work into parallel shards.
-
-### High-Level Data Flow
-
-1. **Trigger (Map Phase):** EventBridge triggers multiple parallel Lambda executions ("workers"), each assigned a specific shard of accounts.
-2. **Process:** Each worker assumes a cross-account IAM role, fetches compliance data from AWS Config, and saves the raw results to an intermediate S3 bucket.
-3. **Aggregation (Reduce Phase):** A final Lambda execution consolidates all intermediate files from S3, deduplicates the data, and generates a formatted Excel report.
-
----
-
-## Event Schema (Input)
-
-The Lambda function is triggered by an EventBridge Rule. The payload dictates the mode of operation (`batch` vs `final`) and the scope of work.
-
-```json
-{
-  "accounts": [
-    { "account_id": "123456789012", "account_name": "prod-app-01" },
-    { "account_id": "987654321098", "account_name": "prod-db-01" }
-  ],
-  "group_id": "2023-10-27", 
-  "mode": "batch",
-  "role_name": "configreport-read-role",
-  "shard_id": "01"
-}
-
-```
-
-| Field | Description |
-| --- | --- |
-| `mode` | Controls execution logic. **`batch`** (default) fetches data; **`final`** aggregates data. |
-| `group_id` | Unique identifier for the report run (usually the Date), used as the S3 folder prefix. |
-| `accounts` | List of target accounts for this specific shard. |
-| `shard_id` | Unique ID for the batch worker to prevent filename collisions in S3. |
-| `role_name` | The IAM role name to assume in target accounts (e.g., `configreport-read-role`). |
-
----
-
-## Execution Modes
-
-### 1. Batch Mode (The "Map" Phase)
-
-* **Responsibility:** Data Collection.
-* **Action:**
-1. Iterates through the provided list of `accounts`.
-2. Assumes `configreport-read-role` in the target account.
-3. Calls AWS Config APIs (`DescribeConfigRules`, `GetComplianceDetailsByConfigRule`).
-4. Extracts tags (specifically `mox.*` tags) for resource ownership.
-
-
-* **Output:** uploads a JSON file to `s3://<bucket>/batches/<group_id>/<shard_id>.json`.
-
-### 2. Final Mode (The "Reduce" Phase)
-
-* **Trigger:** A separate event with `"mode": "final"`.
-* **Responsibility:** Aggregation & Reporting.
-* **Action:**
-1. Scans `s3://<bucket>/batches/<group_id>/` for all worker files.
-2. Merges JSON datasets and filters out duplicate headers.
-3. Calculates compliance statistics (Prod vs. Non-Prod ratios).
-4. Applies conditional formatting (Red/Yellow/Green) to an Excel sheet.
-
-
-* **Output:** Uploads the final report `ConfigRule_<Date>.xlsx` to the S3 report bucket.
-
----
-
-## IAM & Security
-
-The system operates on a **Hub-and-Spoke** security model.
-
-* **Hub (Lambda):** Requires `sts:AssumeRole` permission to access spoke accounts and `s3:PutObject/GetObject` access to the report bucket.
-* **Spoke (Target Accounts):** Must have an IAM Role (e.g., `configreport-read-role`) with a Trust Policy allowing the Hub Lambda to assume it.
-* **Required Permissions:**
-* `config:DescribeConfigRules`
-* `config:GetComplianceDetailsByConfigRule`
-* `config:DescribeConfigurationRecorders`
-
-
-
-
-
-## Infrastructure Requirements
-
-* **Runtime:** Python 3.9+
-* **Environment Variables:**
-* `REPORT_BUCKET`: Target S3 bucket for intermediate files and final reports.
-* `REPORT_PREFIX`: (Optional) Prefix for S3 objects.
+| **Option** | **Architecture Logic** | **Pros** | **Cons** | **Verdict** |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Lambda Sharding** | • EventBridge fires 4 concurrent Lambdas.<br>• Each Lambda processes a "shard" (e.g., `index % 4`).<br>• A final "Merger" function combines 4 CSVs. | • Bypasses 15-min timeout.<br>• Low cost (Serverless). | • **High Complexity:** Merging logic is brittle.<br>• **Partial Failures:** Hard to debug if only Shard 3 fails. | 🔴 **Discard** |
+| **2. Multi-threaded Lambda** | • Single Lambda spawns 20 threads.<br>• Aggregates results in-memory.<br>• Writes final report to S3. | • **Simple:** Single script deployment.<br>• **Fast:** Low operational overhead. | • **Hard Limit:** FAILS if execution exceeds **15 minutes**.<br>• **Risk:** Will break as Org grows > 800 accounts. | 🔴 **Discard**<br>*(Fails Requirement)* |
+| **3. Step Functions** | • "Distributed Map" state triggers 500 tiny Lambdas (one per account).<br>• Step Function aggregates results. | • **Infinite Scale:** No timeout limits.<br>• **Visual Debugging:** See exactly which account failed. | • **Cost:** High (State transitions).<br>• **Complexity:** Requires ASL (Amazon States Language) definition. | 🟡 **Backup Option** |
+| **4. Fargate Task** | • EventBridge triggers a standalone Fargate Container.<br>• Runs script until completion. | • **No Timeouts:** Can run for days.<br>• **Simple Porting:** Lift-and-shift of local script. | • **Slow:** Startup takes ~2 mins.<br>• **Cost:** Higher per-execution cost than existing cluster. | 🔴 **Discard** |
+| **5. K8s CronJob (EKS)** | • **Scheduler:** K8s CronJob triggers Pod on `ptdev-cybsecops`.<br>• **Auth:** Pod assumes IAM Role via **IRSA**.<br>• **Run:** Script runs on existing worker nodes. | • **No Timeouts:** Meets performance requirement.<br>• **Sunk Cost:** Utilizes spare cluster capacity (Free).<br>• **Standard:** Aligns with Platform team's K8s strategy. | • **Setup:** Requires Dockerfile & Helm Chart.<br>• **Deps:** Requires OIDC/IRSA setup (already planned). | 🟢 **Selected** |
