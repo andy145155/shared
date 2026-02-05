@@ -1,42 +1,5 @@
-FROM ghcr.io/astral-sh/uv:python3.14-alpine
+Option 1: Casual (Slack/Teams)
+"Update on the retry logic: I've run the test loop over 100 times with debug mode enabled and haven't been able to reproduce the 'Too Fast' / skipped retry issue anymore. It looks stable locally. I'm going to mark this as done for now, but I'll keep monitoring the logs once we deploy to Dev/Staging to make sure the race condition doesn't come back."
 
-# Add build-time argument to toggle Zscaler support
-ARG ENABLE_ZSCALER=false
-
-# Copy Zscaler certificate conditionally (Keep exact path from your screenshot)
-COPY --chown=app:app ecr-cleanup/scripts/zscaler_2025.pem /tmp/zscaler_2025.pem
-
-# --- CHANGE 1: Copy pyproject.toml and uv.lock instead of requirements.txt ---
-# This assumes you ran 'uv init' and 'uv lock' in the ecr-cleanup folder
-COPY ecr-cleanup/pyproject.toml ecr-cleanup/uv.lock ./
-
-# --- CHANGE 2: Replace pip install with uv sync ---
-# We export SSL_CERT_FILE locally so uv can use the cert you just copied to /tmp
-RUN addgroup -S app && adduser -S -G app app \
-    && export SSL_CERT_FILE=/tmp/zscaler_2025.pem \
-    && uv sync --frozen --no-dev --no-install-project
-
-RUN if [ "$ENABLE_ZSCALER" = "true" ]; then \
-    echo "Enabling Zscaler certificate support..."; \
-    mkdir -p /usr/local/share/ca-certificates/; \
-    cp /tmp/zscaler_2025.pem /usr/local/share/ca-certificates/; \
-    chown app:app /usr/local/share/ca-certificates/zscaler_2025.pem; \
-    update-ca-certificates; \
-    rm /tmp/zscaler_2025.pem; \
-    else \
-    echo "Skipping Zscaler certificate setup"; \
-    rm /tmp/zscaler_2025.pem; \
-    fi
-
-# Copy Python script (Keep exact path from your screenshot)
-COPY ecr-cleanup/scripts/main.py /app/main.py
-
-RUN chown -R app:app /app
-
-# --- CHANGE 3: Enable the virtual environment uv created ---
-ENV PATH="/app/.venv/bin:$PATH"
-
-# Run the application as the non-root user
-USER app
-WORKDIR /app
-ENTRYPOINT ["python", "main.py"]
+Option 2: Standard (Jira/Ticket Comment)
+"After 100+ execution cycles with full debug logging enabled, I am unable to reproduce the intermittent 'skipped retry' failure. The fix appears robust in the local environment. I recommend we consider this resolved/done. I will continue to monitor the proxy logs in Dev and Staging to ensure the behavior remains consistent under higher load."
