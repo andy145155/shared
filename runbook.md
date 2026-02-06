@@ -10,7 +10,6 @@ flowchart TD
     subgraph PROD_Hub ["Hub Account: prod-primary-sec-control"]
         direction TB
         
-        %% Invisible node to push content down (Fixes overlap)
         TitleSpacer[ ]:::invisible
 
         subgraph K8s ["prod-cybsecops-cluster"]
@@ -18,8 +17,9 @@ flowchart TD
         end
 
         subgraph IAM ["Identity & Access"]
-            WriterRole[("system-config-report-generator-write-role<br>(IRSA)")]
-            ReaderRole[("staff-aws-config-report-reader-role<br>(User Assumable)")]
+            %% Added <br> to break long names
+            WriterRole[("system-config-report-<br>generator-write-role<br>(IRSA)")]
+            ReaderRole[("staff-aws-config-<br>report-reader-role<br>(User Assumable)")]
         end
 
         subgraph Data_Layer ["Data Persistence"]
@@ -28,30 +28,23 @@ flowchart TD
     end
 
     subgraph Targets_All ["Allowed Targets (Entire Organization)"]
-        AllSpokes[("Account: All Dev / Stg / Prod / POC<br>(system-config-report-generator-read-role)")]
+        %% Added <br> to break long names
+        AllSpokes[("Account: All Dev / Stg / Prod / POC<br>(system-config-report-<br>generator-read-role)")]
     end
 
     User(["Auditor"])
 
     %% --- EXECUTION FLOW ---
-    %% Link 0: Invisible Spacer Link
     TitleSpacer ~~~ CronJob
-    
-    %% Link 1
     CronJob ==>|1. Assume via OIDC| WriterRole
     
-    %% Audit Flow
-    %% Link 2
     WriterRole -->|2. Scan Compliance| AllSpokes
 
     %% --- S3 WRITE OPERATION ---
-    %% Link 3 (Needs Orange Style)
     WriterRole == "|3. s3:PutObject (Write Only)|" ==> S3
 
     %% --- S3 READ OPERATION ---
-    %% Link 4
     User -->|4. Assume Role| ReaderRole
-    %% Link 5 (Needs Purple Style)
     ReaderRole == "|5. s3:GetObject (Read Only)|" ==> S3
 
     %% Styling
@@ -60,7 +53,7 @@ flowchart TD
     class S3,Data_Layer storage;
     class User,ReaderRole user;
     
-    %% Link Styles (Indices 3 and 5 correspond to the Write and Read operations)
+    %% Link Styles
     linkStyle 3 stroke:#e65100,stroke-width:3px; 
     linkStyle 5 stroke:#4a148c,stroke-width:3px;
 ```
