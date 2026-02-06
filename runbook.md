@@ -27,7 +27,7 @@ flowchart TD
         end
     end
 
-    subgraph Org_Master ["Root Org Master:<br> root-org-master"]
+    subgraph Org_Master ["Allowed Targets: <br> root-org-master"]
         ListRole[("system-config-report-<br>generator-list-org-role")]
     end
 
