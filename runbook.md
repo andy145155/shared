@@ -31,8 +31,9 @@ flowchart TD
         ListRole[("system-config-report-<br>generator-list-org-role")]
     end
 
-    subgraph Targets_All ["Allowed Targets <br> (Entire Organization)"]
-        AllSpokes[("Account: All Dev / Stg / Prod / POC<br>(system-config-report-<br>generator-read-role)")]
+    subgraph Targets_All ["Allowed Targets <br> (All Accounts in poc/ptdev/dev/stg/prod)"]
+        TargetSpacer[ ]:::invisible
+        AllSpokes[("system-config-report-<br>generator-read-role")]
     end
 
     User(["Auditor"])
@@ -48,7 +49,8 @@ flowchart TD
     WriterRole -->|2. List Org Accounts| ListRole
 
     %% Audit Flow
-    %% Link 3
+    %% Link 3: Connect Spacer to Spoke node to enforce layout
+    TargetSpacer ~~~ AllSpokes
     WriterRole -->|3. Scan Compliance| AllSpokes
 
     %% --- S3 WRITE OPERATION ---
