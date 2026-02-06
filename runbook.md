@@ -1,7 +1,8 @@
 ```mermaid
 flowchart TD
     %% Define Styles
-    classDef hub fill:#ffebee,stroke:#c62828,stroke-width:2px;
+    %% CHANGED: Hub is now Indigo (Blue-ish) instead of Red
+    classDef hub fill:#e8eaf6,stroke:#3949ab,stroke-width:2px;
     classDef spoke fill:#e0f2f1,stroke:#00695c,stroke-width:2px;
     classDef storage fill:#fff3e0,stroke:#e65100,stroke-width:2px;
     classDef user fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,stroke-dasharray: 5 5;
@@ -59,7 +60,7 @@ flowchart TD
     class User,ReaderRole user;
     class Start hub;
     
-    %% Link Styles (Indices corrected to 3 and 5)
+    %% Link Styles (Indices 3 and 5)
     linkStyle 3 stroke:#e65100,stroke-width:3px; 
     linkStyle 5 stroke:#4a148c,stroke-width:3px;
 ```
