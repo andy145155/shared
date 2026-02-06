@@ -38,7 +38,7 @@ flowchart TD
         AllowedSpokes[("system-config-report-<br>generator-read-role")]
     end
 
-    subgraph Targets_Blocked ["Forbidden Targets (Dev/Stg/Prod)"]
+    subgraph Targets_Blocked ["Forbidden Targets <br> (Dev/Stg/Prod)"]
         ProdSpoke[("system-config-report-<br>generator-read-role")]
     end
 
