@@ -31,7 +31,7 @@ flowchart TD
         ListRole[("system-config-report-<br>generator-list-org-role")]
     end
 
-    subgraph Targets_All ["Allowed Targets <br> (All Accounts in poc/ptdev/dev/stg/prod)"]
+    subgraph Targets_All ["Allowed Targets <br> (All Accounts in all envs)"]
         TargetSpacer[ ]:::invisible
         AllSpokes[("system-config-report-<br>generator-read-role")]
     end
