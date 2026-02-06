@@ -7,7 +7,8 @@ flowchart TD
     classDef user fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,stroke-dasharray: 5 5;
     classDef invisible width:0px,height:0px,color:transparent,fill:transparent,stroke:none;
     
-    subgraph PROD_Hub ["Hub Account: prod-primary-sec-control"]
+    %% CHANGED: Added <br> to the subgraph title
+    subgraph PROD_Hub ["Hub Account: prod-primary-<br>sec-control"]
         direction TB
         
         TitleSpacer[ ]:::invisible
@@ -17,7 +18,6 @@ flowchart TD
         end
 
         subgraph IAM ["Identity & Access"]
-            %% Added <br> to break long names
             WriterRole[("system-config-report-<br>generator-write-role<br>(IRSA)")]
             ReaderRole[("staff-aws-config-<br>report-reader-role<br>(User Assumable)")]
         end
@@ -28,7 +28,6 @@ flowchart TD
     end
 
     subgraph Targets_All ["Allowed Targets (Entire Organization)"]
-        %% Added <br> to break long names
         AllSpokes[("Account: All Dev / Stg / Prod / POC<br>(system-config-report-<br>generator-read-role)")]
     end
 
