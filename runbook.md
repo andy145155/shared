@@ -1,103 +1,114 @@
-I have revised the **Requirements** and **Decision Log (ADR)** documents to align with Day's feedback.
+```mermaid  
+flowchart TD
+    %% Define Styles
+    classDef devHub fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
+    classDef prodHub fill:#ffebee,stroke:#c62828,stroke-width:2px;
+    classDef devSpoke fill:#e0f2f1,stroke:#00695c,stroke-width:2px;
+    classDef prodSpoke fill:#fbe9e7,stroke:#bf360c,stroke-width:2px;
+    classDef shared fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
 
-### **Revisions Made:**
+    subgraph Org_Master ["Shared Organization Master"]
+        ListRole[("IAM Role:\nlist-org-role")]
+    end
 
-1. **Requirements:** Converted to a **Target Changes Table** format (matching your "Commit Signing" example). I made the metrics concrete (e.g., "> 15 minutes", "Zero manual touchpoints").
-2. **Decision Log:** Consolidated **all** architecture details, logic flows, and pros/cons into a single **comprehensive table** so stakeholders don't have to read long paragraphs.
+    subgraph PTDEV_Environment ["PTDEV Environment (Restricted)"]
+        direction TB
+        DevHub["Hub: ptdev-sec-control"]
+        DevJob("CronJob: Dev Scanner")
+        
+        DevJob -->|1. Assume| DevHub
+    end
 
----
+    subgraph Target_Dev ["Allowed Targets (Non-Prod)"]
+        PocSpoke[("Account: POC\n(read-role)")]
+        PtdevSpoke[("Account: PTDEV\n(read-role)")]
+    end
 
-### **Document 1: Requirements Definition**
+    subgraph Target_Prod ["Forbidden Targets (Production)"]
+        ProdSpoke[("Account: PROD\n(read-role)")]
+    end
 
-## **Target Capabilities & Requirements**
+    %% ALLOWED PATHS
+    DevHub -->|2. List Accounts| ListRole
+    DevHub -->|3. Audit| PocSpoke
+    DevHub -->|3. Audit| PtdevSpoke
 
-The following table defines the mandatory elements for the AWS Config Compliance automation project.
+    %% BLOCKED PATHS (The Enforcement)
+    DevHub -.->|X ACCESS DENIED X| ProdSpoke
 
-| Category | Requirement | Metric / Verification | Target Implementation | Current State |
-| --- | --- | --- | --- | --- |
-| **Automation** | **Zero-Touch Execution**<br>
+    %% Styling
+    class DevHub,DevJob devHub;
+    class ListRole,Org_Master shared;
+    class PocSpoke,PtdevSpoke devSpoke;
+    class ProdSpoke,Target_Prod prodSpoke;
+    
+    %% Link Styling
+    linkStyle 4 stroke:#ff0000,stroke-width:4px,stroke-dasharray: 5 5;
+```
 
-<br>The system must generate and deliver the report automatically on a scheduled basis without human intervention. | **Frequency:** Weekly (Mon 9AM HKT)<br>
 
-<br>**Manual Steps:** 0 | **Kubernetes CronJob** triggered by cluster schedule. Report output is automatically uploaded to S3. | **Manual:** Engineer runs Python script locally on laptop. |
-| **Performance** | **Execution Duration**<br>
 
-<br>The solution must support long-running processes that exceed AWS Lambda's hard limits to accommodate future growth. | **Max Duration:** > 15 minutes<br>
+```mermaid
+flowchart TD
+    %% Define Styles
+    classDef hub fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
+    classDef spoke fill:#e0f2f1,stroke:#00695c,stroke-width:2px;
+    classDef forbidden fill:#ffebee,stroke:#c62828,stroke-width:2px;
+    classDef storage fill:#fff3e0,stroke:#e65100,stroke-width:2px;
+    classDef user fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,stroke-dasharray: 5 5;
 
-<br>**Account Capacity:** Support 500+ accounts | **Containerized Workload** (Pod) running on EKS. No hard timeout limits applied to the process. | **Limited:** Local script runs until finished, but migrating to Lambda would impose a 15-min cap. |
-| **Security** | **Identity Management**<br>
+    subgraph PTDEV_Hub ["Hub Account: ptdev-sec-control"]
+        direction TB
+        
+        subgraph K8s ["EKS Cluster"]
+            Pod("Compliance Pod\n(Python Script)")
+        end
 
-<br>Eliminate long-lived access keys. Use temporary, rotated credentials for all API access. | **Creds Type:** STS Temporary Tokens<br>
+        subgraph IAM ["Identity & Access"]
+            WriterRole[("Writer Role\n(IRSA)")]
+            ReaderRole[("Reader Role\n(User Assumable)")]
+        end
 
-<br>**Keys on Disk:** 0 | **IRSA (IAM Roles for Service Accounts):** Pod authenticates via OIDC. Hub-and-Spoke role assumption for cross-account access. | **Risk:** Relies on `aws-okta` and local `~/.aws/credentials` files on user laptops. |
-| **Output** | **Report Integrity**<br>
+        subgraph Data_Layer ["Data Persistence"]
+            S3[("S3 Bucket\n(Retention: 365 Days)")]
+        end
+    end
 
-<br>The output must match the current Excel format exactly, including conditional formatting and tab structure. | **Format:** `.xlsx`<br>
+    subgraph Targets_Allowed ["Allowed Targets (Non-Prod)"]
+        PocSpoke[("Account: POC\n(read-role)")]
+        PtdevSpoke[("Account: PTDEV\n(read-role)")]
+    end
 
-<br>**Accuracy:** 100% match with legacy script | **Python Pandas/OpenPyXL:** Logic ported to container to generate identical binary Excel file in memory. | **Manual:** Script generates file locally; engineer manually uploads or shares it. |
-| **Scalability** | **Concurrency**<br>
+    subgraph Targets_Blocked ["Forbidden Targets (Prod)"]
+        ProdSpoke[("Account: PROD\n(read-role)")]
+    end
 
-<br>The system must process accounts in parallel to ensure the report creates within a reasonable maintenance window. | **Concurrency:** 20+ Threads<br>
+    User(["Engineer / Auditor"])
 
-<br>**Total Runtime:** < 30 mins (Target) | **Multi-threading:** `concurrent.futures` implementation within the Python container. | **Serial:** Current script runs sequentially or with limited local parallelism. |
+    %% --- EXECUTION FLOW ---
+    Pod ==>|1. Assume via OIDC| WriterRole
+    
+    %% Audit Flow (Isolation)
+    WriterRole -->|2. Scan Compliance| PocSpoke
+    WriterRole -->|2. Scan Compliance| PtdevSpoke
+    WriterRole -.->|X ACCESS DENIED X| ProdSpoke
 
----
+    %% --- S3 WRITE OPERATION ---
+    WriterRole == "|3. s3:PutObject (Write Only)|" ==> S3
 
-### **Document 2: Decision Log (ADR)**
+    %% --- S3 READ OPERATION ---
+    User -->|4. Assume Role| ReaderRole
+    ReaderRole == "|5. s3:GetObject (Read Only)|" ==> S3
 
-## **Architecture Options & Decision Matrix**
-
-We evaluated four options to host the compliance engine. **Option 5 (Kubernetes CronJob)** was selected to meet the requirement of supporting execution times > 15 minutes.
-
-| Option | Architecture Logic | Pros | Cons | Verdict |
-| --- | --- | --- | --- | --- |
-| **1. Lambda Sharding** | • EventBridge fires 4 concurrent Lambdas.<br>
-
-<br>• Each Lambda processes a "shard" (e.g., `index % 4`).<br>
-
-<br>• A final "Merger" function combines 4 CSVs. | • Bypasses 15-min timeout.<br>
-
-<br>• Low cost (Serverless). | • **High Complexity:** Merging logic is brittle.<br>
-
-<br>• **Partial Failures:** Hard to debug if only Shard 3 fails. | 🔴 **Discard** |
-| **2. Multi-threaded Lambda** | • Single Lambda spawns 20 threads.<br>
-
-<br>• Aggregates results in-memory.<br>
-
-<br>• Writes final report to S3. | • **Simple:** Single script deployment.<br>
-
-<br>• **Fast:** Low operational overhead. | • **Hard Limit:** FAILS if execution exceeds **15 minutes**.<br>
-
-<br>• **Risk:** Will break as Org grows > 800 accounts. | 🔴 **Discard** (Fails Requirement) |
-| **3. Step Functions** | • "Distributed Map" state triggers 500 tiny Lambdas (one per account).<br>
-
-<br>• Step Function aggregates results. | • **Infinite Scale:** No timeout limits.<br>
-
-<br>• **Visual Debugging:** See exactly which account failed. | • **Cost:** High (State transitions).<br>
-
-<br>• **Complexity:** Requires ASL (Amazon States Language) definition. | 🟡 **Backup Option** |
-| **4. Fargate Task** | • EventBridge triggers a standalone Fargate Container.<br>
-
-<br>• Runs script until completion. | • **No Timeouts:** Can run for days.<br>
-
-<br>• **Simple Porting:** Lift-and-shift of local script. | • **Slow:** Startup takes ~2 mins.<br>
-
-<br>• **Cost:** Higher per-execution cost than existing cluster. | 🔴 **Discard** |
-| **5. K8s CronJob (EKS)** | • **Scheduler:** K8s CronJob triggers Pod on `ptdev-cybsecops`.<br>
-
-<br>• **Auth:** Pod assumes IAM Role via **IRSA**.<br>
-
-<br>• **Run:** Script runs on existing worker nodes. | • **No Timeouts:** Meets performance requirement.<br>
-
-<br>• **Sunk Cost:** Utilizes spare cluster capacity (Free).<br>
-
-<br>• **Standard:** Aligns with Platform team's K8s strategy. | • **Setup:** Requires Dockerfile & Helm Chart.<br>
-
-<br>• **Deps:** Requires OIDC/IRSA setup (already planned). | 🟢 **Selected** |
-
----
-
-### **Next Steps**
-
-1. **Approve:** Confirm these tables meet the "concrete metrics" and "consolidated view" requests.
-2. **Deploy:** Proceed with **Phase 1 (IAM Foundation)** as outlined in the Implementation Plan.
+    %% Styling
+    class PTDEV_Hub,K8s,IAM hub;
+    class PocSpoke,PtdevSpoke spoke;
+    class ProdSpoke,Targets_Blocked forbidden;
+    class S3,Data_Layer storage;
+    class User,ReaderRole user;
+    
+    %% Link Styles for Emphasis
+    linkStyle 3 stroke:#ff0000,stroke-width:3px,stroke-dasharray: 5 5; 
+    linkStyle 4 stroke:#e65100,stroke-width:3px; 
+    linkStyle 6 stroke:#4a148c,stroke-width:3px;
+```

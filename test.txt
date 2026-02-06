@@ -1,9 +1,45 @@
-TL;DR: I’m removing the current ingress verification test (verification_istio.py). It creates more maintenance debt than value due to persistent hairpinning issues inside the cluster.
+flowchart TD
+    %% Define Styles
+    classDef devHub fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
+    classDef prodHub fill:#ffebee,stroke:#c62828,stroke-width:2px;
+    classDef devSpoke fill:#e0f2f1,stroke:#00695c,stroke-width:2px;
+    classDef prodSpoke fill:#fbe9e7,stroke:#bf360c,stroke-width:2px;
+    classDef shared fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
 
-The Context: We have been blocked by TLS connect errors and SNI mismatches when trying to curl our Ingress Gateway from inside the cluster.
+    subgraph Org_Master ["Shared Organization Master"]
+        ListRole[("IAM Role:\nlist-org-role")]
+    end
 
-The Specifics: Although only the app cluster is having this problem, we have not been able to isolate the definitive root cause after significant debugging.
+    subgraph PTDEV_Environment ["PTDEV Environment (Restricted)"]
+        direction TB
+        DevHub["Hub: ptdev-sec-control"]
+        DevJob("CronJob: Dev Scanner")
+        
+        DevJob -->|1. Assume| DevHub
+    end
 
-The Decision: Rather than sinking more time into investigation or building complex workarounds (like custom certs or sidecar bypasses) for a test-only issue, we are choosing to remove this test to unblock the pipeline.
+    subgraph Target_Dev ["Allowed Targets (Non-Prod)"]
+        PocSpoke[("Account: POC\n(read-role)")]
+        PtdevSpoke[("Account: PTDEV\n(read-role)")]
+    end
 
-The Fix: We will rely on istioctl analyze for config validation and move actual end-to-end connectivity tests to our external CI pipeline (where they belong).
+    subgraph Target_Prod ["Forbidden Targets (Production)"]
+        ProdSpoke[("Account: PROD\n(read-role)")]
+    end
+
+    %% ALLOWED PATHS
+    DevHub -->|2. List Accounts| ListRole
+    DevHub -->|3. Audit| PocSpoke
+    DevHub -->|3. Audit| PtdevSpoke
+
+    %% BLOCKED PATHS (The Enforcement)
+    DevHub -.->|X ACCESS DENIED X| ProdSpoke
+
+    %% Styling
+    class DevHub,DevJob devHub;
+    class ListRole,Org_Master shared;
+    class PocSpoke,PtdevSpoke devSpoke;
+    class ProdSpoke,Target_Prod prodSpoke;
+    
+    %% Link Styling
+    linkStyle 4 stroke:#ff0000,stroke-width:4px,stroke-dasharray: 5 5;
