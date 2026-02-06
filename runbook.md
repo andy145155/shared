@@ -27,7 +27,7 @@ flowchart TD
         end
     end
 
-    subgraph Org_Master ["Allowed Targets: <br> root-org-master"]
+    subgraph Org_Master ["Allowed Targets <br> root-org-master"]
         ListRole[("system-config-report-<br>generator-list-org-role")]
     end
 
@@ -49,7 +49,6 @@ flowchart TD
 
     %% Audit Flow
     %% Link 3: Connect Spacer to Spoke node to enforce layout
-    TargetSpacer ~~~ AllSpokes
     WriterRole -->|3. Scan Compliance| AllSpokes
 
     %% --- S3 WRITE OPERATION ---
