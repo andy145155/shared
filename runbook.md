@@ -1,19 +1,21 @@
 ```mermaid
 flowchart TD
     %% Define Styles
-    classDef hub fill:#e8eaf6,stroke:#3949ab,stroke-width:2px;
+    classDef hub fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
     classDef master fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
     classDef spoke fill:#e0f2f1,stroke:#00695c,stroke-width:2px;
+    classDef forbidden fill:#ffebee,stroke:#c62828,stroke-width:2px;
     classDef storage fill:#fff3e0,stroke:#e65100,stroke-width:2px;
     classDef user fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,stroke-dasharray: 5 5;
     classDef invisible width:0px,height:0px,color:transparent,fill:transparent,stroke:none;
-    
-    subgraph PROD_Hub ["Hub Account: prod-primary-<br>sec-control"]
+
+    subgraph PTDEV_Hub ["Hub Account: ptdev-primary-<br>sec-control"]
         direction TB
         
+        %% Invisible node to push content down
         TitleSpacer[ ]:::invisible
 
-        subgraph K8s ["prod-cybsecops-cluster"]
+        subgraph K8s ["ptdev-cybsecops-cluster"]
             CronJob("aws-config-report-generator<br>(Python K8S CronJob)")
         end
 
@@ -23,7 +25,7 @@ flowchart TD
         end
 
         subgraph Data_Layer ["Data Persistence"]
-            S3[("S3 Bucket<br>(Retention: 365 Days)")]
+            S3[("Report S3 Bucket<br>(Retention: 30 Days)")]
         end
     end
 
@@ -31,8 +33,13 @@ flowchart TD
         ListRole[("system-config-report-<br>generator-list-org-role")]
     end
 
-    subgraph Targets_All ["Allowed Targets <br> (All Accounts in all envs)"]
-        AllSpokes[("system-config-report-<br>generator-read-role")]
+    subgraph Targets_Allowed ["Allowed Targets <br> (ptdev & poc)"]
+        %% Combined Node
+        AllowedSpokes[("system-config-report-<br>generator-read-role")]
+    end
+
+    subgraph Targets_Blocked ["Forbidden Targets (Dev/Stg/Prod)"]
+        ProdSpoke[("system-config-report-<br>generator-read-role")]
     end
 
     User(["Auditor"])
@@ -43,32 +50,36 @@ flowchart TD
     %% Link 1
     CronJob ==>|1. Assume via OIDC| WriterRole
     
-    %% Discovery Step (New)
+    %% Discovery Step
     %% Link 2
     WriterRole -->|2. List Org Accounts| ListRole
 
-    %% Audit Flow
-    %% Link 3: Connect Spacer to Spoke node to enforce layout
-    WriterRole -->|3. Scan Compliance| AllSpokes
+    %% Audit Flow (Isolation)
+    %% Link 3
+    WriterRole -->|3. Scan Compliance| AllowedSpokes
+    %% Link 4 (Needs Red Dashed Style)
+    WriterRole -.->|X ACCESS DENIED X| ProdSpoke
 
     %% --- S3 WRITE OPERATION ---
-    %% Link 4 (Needs Orange Style)
-    WriterRole == "|4. s3:PutObject (Write Only)|" ==> S3
+    %% Link 5 (Needs Orange Style)
+    WriterRole == "|4. s3:PutObject <br> (Write Only)|" ==> S3
 
     %% --- S3 READ OPERATION ---
-    %% Link 5
+    %% Link 6
     User -->|5. Assume Role| ReaderRole
-    %% Link 6 (Needs Purple Style)
-    ReaderRole == "|6. s3:GetObject (Read Only)|" ==> S3
+    %% Link 7 (Needs Purple Style)
+    ReaderRole == "|6. s3:GetObject <br> (Read Only)|" ==> S3
 
     %% Styling
-    class PROD_Hub,K8s,IAM hub;
+    class PTDEV_Hub,K8s,IAM hub;
     class Org_Master,ListRole master;
-    class AllSpokes spoke;
+    class AllowedSpokes spoke;
+    class ProdSpoke,Targets_Blocked forbidden;
     class S3,Data_Layer storage;
     class User,ReaderRole user;
     
-    %% Link Styles (Indices updated: 4 is Write, 6 is Read)
-    linkStyle 4 stroke:#e65100,stroke-width:3px; 
-    linkStyle 6 stroke:#4a148c,stroke-width:3px;
+    %% Link Styles for Emphasis
+    linkStyle 4 stroke:#ff0000,stroke-width:3px,stroke-dasharray: 5 5; 
+    linkStyle 5 stroke:#e65100,stroke-width:3px; 
+    linkStyle 7 stroke:#4a148c,stroke-width:3px;
 ```
