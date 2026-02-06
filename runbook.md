@@ -1,20 +1,18 @@
 ```mermaid
 flowchart TD
     %% Define Styles
-    classDef hub fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
+    classDef hub fill:#ffebee,stroke:#c62828,stroke-width:2px;
     classDef spoke fill:#e0f2f1,stroke:#00695c,stroke-width:2px;
-    classDef forbidden fill:#ffebee,stroke:#c62828,stroke-width:2px;
     classDef storage fill:#fff3e0,stroke:#e65100,stroke-width:2px;
     classDef user fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,stroke-dasharray: 5 5;
-    classDef invisible width:0px,height:0px,color:transparent,fill:transparent,stroke:none;
-
-    subgraph PTDEV_Hub ["Hub Account: ptdev-primary-sec-control"]
+    
+    subgraph PROD_Hub ["Hub Account: prod-primary-sec-control"]
         direction TB
         
-        %% Invisible node to push content down
-        TitleSpacer[ ]:::invisible
+        %% Standard Start Node
+        Start((Start))
 
-        subgraph K8s ["ptdev-prod-cybsecops-cluster"]
+        subgraph K8s ["prod-cybsecops-cluster"]
             CronJob("aws-config-report-generator<br>(Python Script)")
         end
 
@@ -24,46 +22,44 @@ flowchart TD
         end
 
         subgraph Data_Layer ["Data Persistence"]
-            S3[("Report S3 Bucket<br>(Retention: 365 Days)")]
+            S3[("S3 Bucket<br>(Retention: 365 Days)")]
         end
     end
 
-    subgraph Targets_Allowed ["Allowed Targets (ptdev/poc)"]
-        PocSpoke[("Account: All poc<br>(system-config-report-generator-read-role)")]
-        PtdevSpoke[("Account: All ptdev<br>(system-config-report-generator-read-role)")]
-    end
-
-    subgraph Targets_Blocked ["Forbidden Targets (Dev/Stg/Prod)"]
-        ProdSpoke[("Account: All dev/stg/prod<br>(system-config-report-generator-read-role)")]
+    subgraph Targets_All ["Allowed Targets (Entire Organization)"]
+        AllSpokes[("Account: All Dev / Stg / Prod / POC<br>(system-config-report-generator-read-role)")]
     end
 
     User(["Auditor"])
 
     %% --- EXECUTION FLOW ---
-    TitleSpacer ~~~ CronJob
+    %% Link 0
+    Start --> CronJob
+    %% Link 1
     CronJob ==>|1. Assume via OIDC| WriterRole
     
-    %% Audit Flow (Isolation)
-    WriterRole -->|2. Scan Compliance| PocSpoke
-    WriterRole -->|2. Scan Compliance| PtdevSpoke
-    WriterRole -.->|X ACCESS DENIED X| ProdSpoke
+    %% Audit Flow (Universal Access)
+    %% Link 2
+    WriterRole -->|2. Scan Compliance| AllSpokes
 
     %% --- S3 WRITE OPERATION ---
+    %% Link 3 (Needs Styling: Orange)
     WriterRole == "|3. s3:PutObject (Write Only)|" ==> S3
 
     %% --- S3 READ OPERATION ---
+    %% Link 4
     User -->|4. Assume Role| ReaderRole
+    %% Link 5 (Needs Styling: Purple)
     ReaderRole == "|5. s3:GetObject (Read Only)|" ==> S3
 
     %% Styling
-    class PTDEV_Hub,K8s,IAM hub;
-    class PocSpoke,PtdevSpoke spoke;
-    class ProdSpoke,Targets_Blocked forbidden;
+    class PROD_Hub,K8s,IAM hub;
+    class AllSpokes spoke;
     class S3,Data_Layer storage;
     class User,ReaderRole user;
+    class Start hub;
     
-    %% Link Styles for Emphasis
-    linkStyle 4 stroke:#ff0000,stroke-width:3px,stroke-dasharray: 5 5; 
-    linkStyle 5 stroke:#e65100,stroke-width:3px; 
-    linkStyle 7 stroke:#4a148c,stroke-width:3px;
+    %% Link Styles (Indices corrected to 3 and 5)
+    linkStyle 3 stroke:#e65100,stroke-width:3px; 
+    linkStyle 5 stroke:#4a148c,stroke-width:3px;
 ```
