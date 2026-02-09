@@ -1,60 +1,67 @@
-Here is a draft for the Jira task. I have structured it to be clear for your internal team while providing a copy-pasteable template you can use to open the support case with AWS.
+Here is a comprehensive Jira ticket template based on your situation. It frames the issue as an investigation into a reliable solution, acknowledging that the current "internal curl" method is problematic.
 
-### Jira Task
+**Title:** [SPIKE] Investigate and Implement Reliable Istio Ingress Verification for ArgoCD Pipeline
 
-**Summary:** [Investigation] Clarify AWS vCPU Quota release latency during EKS Rolling Upgrades
+**Type:** Task / Spike
+**Priority:** High
+**Labels:** `istio`, `automation`, `argocd`, `quality-assurance`
 
-**Issue Type:** Task / Investigation
-**Priority:** Medium (or High, depending on your next upgrade schedule)
-**Component:** AWS / EKS / Capacity Planning
+---
 
-**Description:**
+### **Description**
 
 **Context:**
-During our recent EKS upgrade cycle, we attempted to upgrade multiple clusters simultaneously within the `apps` AWS account. We encountered `VcpuLimitExceeded` errors. This occurred because the node group rolling update process spins up new nodes (surge) before terminating the old ones.
+We currently rely on a Python automation script to verify Istio Ingress functionality during our release pipeline. The current implementation runs inside the cluster and attempts to verify connectivity by `exec`-ing into a client pod and running `curl` against the `istio-ingressgateway` **internal ClusterIP** using the `--resolve` flag (forcing the host to resolve to the internal IP).
 
-**Problem Statement:**
-We observed that even as old nodes were terminating, the vCPU quota did not seem to free up immediately. This suggests a latency between an EC2 instance entering the `terminated` state and the vCPU quota actually being released back to the account pool. This "lag" caused us to hit the account limit when upgrading parallel clusters, even though our theoretical steady-state usage is well within limits.
+**The Problem:**
+This "internal hairpin" approach is failing consistently in the **App Cluster**. The test fails during the TLS handshake with the error:
+
+> `curl: (35) TLS connect error: error:0A000126:SSL routines::unexpected eof while reading`
+
+This indicates that traffic originating from inside the mesh, targeted at the Ingress Gateway service IP, is conflicting with the sidecar/Envoy mTLS configuration or TLS termination logic.
 
 **Objective:**
-Open a technical inquiry case with AWS Support to clarify the internal mechanics of vCPU quota handling to prevent this in future bulk upgrades.
+Investigate a robust and "correct" method for verifying Ingress functionality that simulates real-world usage (North-South traffic) and integrate it into our ArgoCD pipeline (e.g., as a PostSync hook).
 
-**Action Items:**
+### **Investigation Scope**
 
-1. Open a support ticket with AWS (Technical Support).
-2. Submit the questions listed below regarding Quota Refreshes and Rolling Update logic.
-3. Document the findings in our "EKS Upgrade Runbook" or Capacity Planning docs.
+1. **Root Cause Analysis (Current Method):**
+* Confirm if the `unexpected eof` is caused by Envoy sidecar interception (mTLS vs. TLS conflict) when targeting the Ingress Service ClusterIP.
+* Determine if this internal verification method should be deprecated entirely in favor of external checks.
 
----
 
-### **Draft for AWS Support Case (Copy/Paste below)**
+2. **Explore Alternative Verification Strategies:**
+* **Option A (External Check):** Can the test run from a context that has access to the external LoadBalancer IP / DNS? (True North-South test).
+* **Option B (Loopback w/o Sidecar):** Can the test run in a pod *without* an Istio sidecar to avoid mTLS interference?
+* **Option C (Gateway Hairpinning):** Is there a specific Istio `Gateway` configuration required to allow internal services to route to the Gateway's public IP effectively?
 
-**Subject:** Inquiry regarding vCPU Quota release latency and calculations during EKS Managed Node Group updates
 
-**Body:**
-Hello AWS Support,
+3. **ArgoCD Integration:**
+* Ensure the chosen solution can run as a standardized ArgoCD Hook (Job) or within the existing Python automation framework.
 
-We recently encountered vCPU capacity issues (`VcpuLimitExceeded`) during an EKS upgrade where we triggered rolling updates for multiple clusters simultaneously in the same account.
 
-We observed that as nodes were rolling, we hit the vCPU limit. We suspect this is because the vCPU quota utilization metric is not updated in real-time immediately upon instance termination. It appears there is a delay between an instance terminating and that vCPU capacity being credited back to our available quota, preventing new nodes from launching during the surge phase.
 
-We need technical clarification on the following points to plan our future bulk upgrades:
+### **Acceptance Criteria**
 
-1. **Quota Release Latency:** What is the expected latency between an EC2 instance entering the `Terminated` state and the vCPU quota being released/updated in the account? Is this real-time or is there a specific synchronization interval?
-2. **Rolling Upgrade Mechanics:** Could you provide detailed steps on how the vCPU check is performed during an EKS Managed Node Group rolling update? Does the control plane reserve the quota for the *entire* batch of surge nodes before terminating the old ones?
-3. **Concurrency Limitations:** If we upgrade multiple clusters at once, is there a risk of "race conditions" where the quota service reads stale data regarding our current utilization?
-4. **Best Practices:** For scenarios where we run close to our vCPU limits during upgrades (due to surge nodes), do you recommend a specific wait time or buffer percentage to account for this quota release delay?
+* [ ] Root cause of the App Cluster TLS failure is documented.
+* [ ] A decision is made: Fix the internal test OR replace it with an external verification pattern.
+* [ ] A working Proof of Concept (POC) script is created that successfully verifies:
+* [ ] Route availability (Status 200).
+* [ ] TLS handshake success.
+* [ ] Correct routing to the target backend.
 
-Thank you.
 
----
+* [ ] The solution is compatible with the current ArgoCD pipeline.
 
-**Acceptance Criteria:**
+### **Technical Notes & Resources**
 
-* [ ] AWS Support case opened.
-* [ ] Clarification received regarding the time it takes for vCPU quota to update after termination.
-* [ ] Confirmation on whether Quota checks are real-time or eventually consistent.
-* [ ] EKS Upgrade documentation updated with constraints on parallel cluster upgrades (e.g., "Do not upgrade more than X clusters at once" or "Request temporary quota increase of Y% before upgrades").
+* **Current Error:** `error:0A000126:SSL routines::unexpected eof while reading`
+* **Current Command:**
+```bash
+curl -k --resolve <HOST>:443:<INTERNAL_CLUSTER_IP> https://<HOST>/status/200
 
-**Next Step:**
-Would you like me to generate a script to calculate your current "Surge" vCPU requirements based on your running node groups, so you know exactly how much buffer you need for the next upgrade?
+```
+
+
+* **Repo:** [Link to your repo/script]
+* **Logs:** See attached screenshot of failure in App Cluster.
