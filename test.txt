@@ -1,45 +1,60 @@
-flowchart TD
-    %% Define Styles
-    classDef devHub fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
-    classDef prodHub fill:#ffebee,stroke:#c62828,stroke-width:2px;
-    classDef devSpoke fill:#e0f2f1,stroke:#00695c,stroke-width:2px;
-    classDef prodSpoke fill:#fbe9e7,stroke:#bf360c,stroke-width:2px;
-    classDef shared fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
+Here is a draft for the Jira task. I have structured it to be clear for your internal team while providing a copy-pasteable template you can use to open the support case with AWS.
 
-    subgraph Org_Master ["Shared Organization Master"]
-        ListRole[("IAM Role:\nlist-org-role")]
-    end
+### Jira Task
 
-    subgraph PTDEV_Environment ["PTDEV Environment (Restricted)"]
-        direction TB
-        DevHub["Hub: ptdev-sec-control"]
-        DevJob("CronJob: Dev Scanner")
-        
-        DevJob -->|1. Assume| DevHub
-    end
+**Summary:** [Investigation] Clarify AWS vCPU Quota release latency during EKS Rolling Upgrades
 
-    subgraph Target_Dev ["Allowed Targets (Non-Prod)"]
-        PocSpoke[("Account: POC\n(read-role)")]
-        PtdevSpoke[("Account: PTDEV\n(read-role)")]
-    end
+**Issue Type:** Task / Investigation
+**Priority:** Medium (or High, depending on your next upgrade schedule)
+**Component:** AWS / EKS / Capacity Planning
 
-    subgraph Target_Prod ["Forbidden Targets (Production)"]
-        ProdSpoke[("Account: PROD\n(read-role)")]
-    end
+**Description:**
 
-    %% ALLOWED PATHS
-    DevHub -->|2. List Accounts| ListRole
-    DevHub -->|3. Audit| PocSpoke
-    DevHub -->|3. Audit| PtdevSpoke
+**Context:**
+During our recent EKS upgrade cycle, we attempted to upgrade multiple clusters simultaneously within the `apps` AWS account. We encountered `VcpuLimitExceeded` errors. This occurred because the node group rolling update process spins up new nodes (surge) before terminating the old ones.
 
-    %% BLOCKED PATHS (The Enforcement)
-    DevHub -.->|X ACCESS DENIED X| ProdSpoke
+**Problem Statement:**
+We observed that even as old nodes were terminating, the vCPU quota did not seem to free up immediately. This suggests a latency between an EC2 instance entering the `terminated` state and the vCPU quota actually being released back to the account pool. This "lag" caused us to hit the account limit when upgrading parallel clusters, even though our theoretical steady-state usage is well within limits.
 
-    %% Styling
-    class DevHub,DevJob devHub;
-    class ListRole,Org_Master shared;
-    class PocSpoke,PtdevSpoke devSpoke;
-    class ProdSpoke,Target_Prod prodSpoke;
-    
-    %% Link Styling
-    linkStyle 4 stroke:#ff0000,stroke-width:4px,stroke-dasharray: 5 5;
+**Objective:**
+Open a technical inquiry case with AWS Support to clarify the internal mechanics of vCPU quota handling to prevent this in future bulk upgrades.
+
+**Action Items:**
+
+1. Open a support ticket with AWS (Technical Support).
+2. Submit the questions listed below regarding Quota Refreshes and Rolling Update logic.
+3. Document the findings in our "EKS Upgrade Runbook" or Capacity Planning docs.
+
+---
+
+### **Draft for AWS Support Case (Copy/Paste below)**
+
+**Subject:** Inquiry regarding vCPU Quota release latency and calculations during EKS Managed Node Group updates
+
+**Body:**
+Hello AWS Support,
+
+We recently encountered vCPU capacity issues (`VcpuLimitExceeded`) during an EKS upgrade where we triggered rolling updates for multiple clusters simultaneously in the same account.
+
+We observed that as nodes were rolling, we hit the vCPU limit. We suspect this is because the vCPU quota utilization metric is not updated in real-time immediately upon instance termination. It appears there is a delay between an instance terminating and that vCPU capacity being credited back to our available quota, preventing new nodes from launching during the surge phase.
+
+We need technical clarification on the following points to plan our future bulk upgrades:
+
+1. **Quota Release Latency:** What is the expected latency between an EC2 instance entering the `Terminated` state and the vCPU quota being released/updated in the account? Is this real-time or is there a specific synchronization interval?
+2. **Rolling Upgrade Mechanics:** Could you provide detailed steps on how the vCPU check is performed during an EKS Managed Node Group rolling update? Does the control plane reserve the quota for the *entire* batch of surge nodes before terminating the old ones?
+3. **Concurrency Limitations:** If we upgrade multiple clusters at once, is there a risk of "race conditions" where the quota service reads stale data regarding our current utilization?
+4. **Best Practices:** For scenarios where we run close to our vCPU limits during upgrades (due to surge nodes), do you recommend a specific wait time or buffer percentage to account for this quota release delay?
+
+Thank you.
+
+---
+
+**Acceptance Criteria:**
+
+* [ ] AWS Support case opened.
+* [ ] Clarification received regarding the time it takes for vCPU quota to update after termination.
+* [ ] Confirmation on whether Quota checks are real-time or eventually consistent.
+* [ ] EKS Upgrade documentation updated with constraints on parallel cluster upgrades (e.g., "Do not upgrade more than X clusters at once" or "Request temporary quota increase of Y% before upgrades").
+
+**Next Step:**
+Would you like me to generate a script to calculate your current "Surge" vCPU requirements based on your running node groups, so you know exactly how much buffer you need for the next upgrade?
