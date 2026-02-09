@@ -1,67 +1,57 @@
-Here is a comprehensive Jira ticket template based on your situation. It frames the issue as an investigation into a reliable solution, acknowledging that the current "internal curl" method is problematic.
+Here is the updated Jira ticket. I have removed the investigation into the old method and refocused the ticket on **designing a replacement**.
 
-**Title:** [SPIKE] Investigate and Implement Reliable Istio Ingress Verification for ArgoCD Pipeline
+---
 
-**Type:** Task / Spike
+**Title:** Design and Implement Reliable Istio Ingress Verification for ArgoCD Pipeline
+
+**Type:** Story / Task
 **Priority:** High
-**Labels:** `istio`, `automation`, `argocd`, `quality-assurance`
+**Labels:** `istio`, `automation`, `argocd`, `design`
 
 ---
 
 ### **Description**
 
 **Context:**
-We currently rely on a Python automation script to verify Istio Ingress functionality during our release pipeline. The current implementation runs inside the cluster and attempts to verify connectivity by `exec`-ing into a client pod and running `curl` against the `istio-ingressgateway` **internal ClusterIP** using the `--resolve` flag (forcing the host to resolve to the internal IP).
-
-**The Problem:**
-This "internal hairpin" approach is failing consistently in the **App Cluster**. The test fails during the TLS handshake with the error:
-
-> `curl: (35) TLS connect error: error:0A000126:SSL routines::unexpected eof while reading`
-
-This indicates that traffic originating from inside the mesh, targeted at the Ingress Gateway service IP, is conflicting with the sidecar/Envoy mTLS configuration or TLS termination logic.
+We are deprecating our current Ingress verification method (`run_ingress_tests`), which relies on an internal "hairpin" technique (exec-ing into a pod and `curl`-ing the Ingress Gateway's **internal ClusterIP**). This method is technically incorrect for testing Ingress (North-South traffic) and has proven unreliable in our App Cluster, failing with TLS handshake errors due to sidecar/mesh conflicts.
 
 **Objective:**
-Investigate a robust and "correct" method for verifying Ingress functionality that simulates real-world usage (North-South traffic) and integrate it into our ArgoCD pipeline (e.g., as a PostSync hook).
+We need to design a robust, "correct" verification strategy that simulates real external user traffic. This new test will replace the deprecated function and must be integrated into our automation pipeline (likely as an ArgoCD PostSync hook).
 
-### **Investigation Scope**
+**Goal:**
+Create a **Design Document** outlining a new Ingress verification approach that validates:
 
-1. **Root Cause Analysis (Current Method):**
-* Confirm if the `unexpected eof` is caused by Envoy sidecar interception (mTLS vs. TLS conflict) when targeting the Ingress Service ClusterIP.
-* Determine if this internal verification method should be deprecated entirely in favor of external checks.
+1. **Public/External Connectivity:** Ensuring the Ingress Gateway is reachable via its external LoadBalancer/DNS.
+2. **TLS Termination:** Verifying certificates are served correctly.
+3. **Routing Rules:** Confirming `VirtualService` and `Gateway` configurations route traffic to the correct backend.
+
+### **Scope of Work**
+
+1. **Research Valid Verification Patterns:**
+* Evaluate options for running tests from "outside" the mesh (e.g., a standalone runner, a Lambda function, or a pod explicitly excluded from the mesh).
+* Determine how to safely target the external LoadBalancer IP from within our CI/CD environment.
 
 
-2. **Explore Alternative Verification Strategies:**
-* **Option A (External Check):** Can the test run from a context that has access to the external LoadBalancer IP / DNS? (True North-South test).
-* **Option B (Loopback w/o Sidecar):** Can the test run in a pod *without* an Istio sidecar to avoid mTLS interference?
-* **Option C (Gateway Hairpinning):** Is there a specific Istio `Gateway` configuration required to allow internal services to route to the Gateway's public IP effectively?
+2. **ArgoCD Integration Strategy:**
+* Define how this test will run as a PostSync hook.
+* Define success/failure criteria (e.g., specific HTTP codes, timeout handling).
 
 
-3. **ArgoCD Integration:**
-* Ensure the chosen solution can run as a standardized ArgoCD Hook (Job) or within the existing Python automation framework.
+3. **Create Design Document:**
+* Draft a document detailing the proposed architecture, required permissions, and implementation steps.
 
 
 
 ### **Acceptance Criteria**
 
-* [ ] Root cause of the App Cluster TLS failure is documented.
-* [ ] A decision is made: Fix the internal test OR replace it with an external verification pattern.
-* [ ] A working Proof of Concept (POC) script is created that successfully verifies:
-* [ ] Route availability (Status 200).
-* [ ] TLS handshake success.
-* [ ] Correct routing to the target backend.
+* [ ] **Design Document Created:** A finalized design doc is reviewed and approved by the team.
+* *Must include:* Diagram of traffic flow for the test (Source -> LoadBalancer -> Gateway -> Pod).
 
 
-* [ ] The solution is compatible with the current ArgoCD pipeline.
+* [ ] **Deprecation Plan:** Confirmation that the old internal `curl` method will be removed.
+* [ ] **Feasibility Check:** The proposed solution is verified to work with our specific network policies and ArgoCD setup.
 
-### **Technical Notes & Resources**
+### **Technical Notes**
 
-* **Current Error:** `error:0A000126:SSL routines::unexpected eof while reading`
-* **Current Command:**
-```bash
-curl -k --resolve <HOST>:443:<INTERNAL_CLUSTER_IP> https://<HOST>/status/200
-
-```
-
-
-* **Repo:** [Link to your repo/script]
-* **Logs:** See attached screenshot of failure in App Cluster.
+* **Deprecated Method:** `curl --resolve ... <ClusterIP>` (Do not use).
+* **Target State:** The test should reflect a true client request entering the cluster via the external LoadBalancer.
