@@ -1,63 +1,81 @@
-This revision improves the "Refactor" ticket by adding structure and, crucially, **addressing the conflict with the previous ticket**.
+Here is a draft for the **"New ArgoCD Application"** section of your design document. It formalizes the "Umbrella Chart" approach we discussed and specifies the exact file paths.
 
-Since you are designing a *new* Ingress test (Ticket 1), you likely should **not** spend time refactoring the *old* Ingress script (`verify_ingress_gateway.py`) in this ticket. I have updated the scope to reflect that.
-
-### **Title:** Refactor and Containerize Istio Verification Suite
-
-**Description**
-
-**Context**
-Currently, our Istio verification logic exists as a "Monolithic Verification" script in the `af-toolkit`. To integrate this into our pipeline (e.g., as independent ArgoCD hooks or init containers), we need to modularize this logic.
-
-**Objective**
-Split the monolithic Python automation into standalone, modular scripts and package them into a single Docker container. This container must accept arguments to trigger specific verification suites (e.g., Control Plane vs. Data Plane) on demand.
-
-**Scope of Work**
-
-1. **Modularization (Split Logic):**
-Extract the following logic into independent scripts.
-* *Note: Ingress logic (`verify_ingress_gateway.py`) is excluded from this refactor as it is being redesigned in a separate task.*
-* **Control Plane:** `verify_controlplane.py` (Checking istiod status, etc.)
-* **Data Plane:** `verify_istio_mtls.py`, `verify_retry_after.py`, and `istioctl proxy-status`.
-
-
-2. **Code Refactoring (Modernization):**
-* **Remove Subprocess:** Replace shell commands (`subprocess.run("kubectl ...")`) with the native **Kubernetes Python Client**. This improves error handling and security.
-* **Argument Parsing:** Implement `argparse` to allow flags like `--namespace` or `--timeout`.
-
-
-3. **Containerization:**
-* Create a `Dockerfile` for the verification suite.
-* Implement an entrypoint script that accepts a "mode" argument to run the specific test (e.g., `entrypoint.sh --mode control-plane`).
-
-
-4. **Documentation:**
-* Create a `README.md` following standard templates, explaining how to run the container locally and what arguments are available.
-
-
-
-**Acceptance Criteria**
-
-* [ ] **Scripts Separated:** Logic is successfully split into distinct files (Control Plane vs. Data Plane).
-* [ ] **K8s Client Implemented:** Code no longer uses `subprocess` for standard Kubernetes operations.
-* [ ] **Docker Image Built:** A Docker image is successfully built.
-* [ ] **Argument Execution Verified:**
-* Running `docker run ... --mode control-plane` executes only control plane checks.
-* Running `docker run ... --mode data-plane` executes only mTLS/proxy checks.
-
-
-* [ ] **Documentation:** README includes build instructions and usage examples.
-
-**Technical Notes**
-
-* **Repo:** `af-toolkit` / `platform-automation`
-* **Library:** Use `kubernetes` (official Python client).
-* **Excluded:** `verify_ingress_gateway.py` (Deprecating).
+You can copy and paste this directly into your Confluence doc.
 
 ---
 
-### Why I made these changes:
+## **New ArgoCD Application: cf-automation**
 
-1. **Connected the dots:** I explicitly noted to **exclude** the Ingress script. There is no point in refactoring `verify_ingress_gateway.py` (changing `subprocess` to `k8s-client`) if you are about to delete it in the other ticket.
-2. **Clarified the "Entrypoint":** I added the requirement for an entrypoint script/logic. Simply having separate files isn't enough for a Docker container; you need a way to tell the container *which* file to run when it starts.
-3. **Emphasized the Python Client:** Moving from `subprocess` to the K8s client is a significant code change, so I elevated it to a primary scope item rather than a footer note.
+To ensure clear ownership and isolation of Core Foundation (CF) operations, we will introduce a new ArgoCD application dedicated to the `cybsecops` cluster. This application acts as an "Umbrella Chart," managing the `aws-config-report-generator` and serving as a home for future CF-related automation jobs.
+
+### **1. Application Structure & Location**
+
+The application source code will be nested directly within the `cybsecops` cluster configuration to enforce cluster-specific isolation.
+
+* **App Name:** `cf-automation`
+* **Target Cluster:** `cybsecops` (Productive & Non-Productive)
+* **Target Namespace:** `cf-automation`
+* **Repository Path:** `apps/clusters/cybsecops/cf-automation`
+
+### **2. Repository File Hierarchy**
+
+We will implement a split-config pattern where the ArgoCD "Manager" manifest lives in the cluster templates, while the actual application logic (the "Source") resides in a nested folder.
+
+```text
+apps/
+└── clusters/
+    └── cybsecops/
+        ├── templates/
+        │   └── cf-automation.yaml       # <--- The ArgoCD Application Manifest
+        │
+        └── cf-automation/               # <--- The Source Code (Umbrella Chart)
+            ├── Chart.yaml
+            ├── values.yaml
+            └── templates/
+                ├── aws-config-report.yaml    # <--- Our Compliance Service
+                └── (future-cf-service).yaml  # <--- Future jobs go here
+
+```
+
+### **3. Application Manifest Specification**
+
+**File:** `apps/clusters/cybsecops/templates/cf-automation.yaml`
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .Values.mox.cluster.name }}.cf-automation
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    cluster: {{ .Values.mox.cluster.name }}
+    app: cf-automation
+    part-of: cluster
+    owner: core-foundation
+spec:
+  project: default
+  destination:
+    name: {{ .Values.mox.argocd.cluster }}
+    namespace: cf-automation
+  syncPolicy:
+    automated: {}
+    syncOptions:
+      - ApplyOutOfSyncOnly=true
+      - CreateNamespace=true  # Automatically creates the 'cf-automation' namespace
+  source:
+    repoURL: https://github.com/ProjectDrgn/argocd-apps
+    # Points to the internal nested folder
+    path: apps/clusters/cybsecops/cf-automation
+    targetRevision: {{ .Values.mox.argocd.branch }}
+    plugin:
+      name: mox
+      env:
+        - name: helm
+          value: |
+            releaseName: cf-automation
+            values:
+              awsConfigReport:
+                enabled: true
+
+```
