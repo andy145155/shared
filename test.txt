@@ -1,57 +1,63 @@
-Here is the updated Jira ticket. I have removed the investigation into the old method and refocused the ticket on **designing a replacement**.
+This revision improves the "Refactor" ticket by adding structure and, crucially, **addressing the conflict with the previous ticket**.
+
+Since you are designing a *new* Ingress test (Ticket 1), you likely should **not** spend time refactoring the *old* Ingress script (`verify_ingress_gateway.py`) in this ticket. I have updated the scope to reflect that.
+
+### **Title:** Refactor and Containerize Istio Verification Suite
+
+**Description**
+
+**Context**
+Currently, our Istio verification logic exists as a "Monolithic Verification" script in the `af-toolkit`. To integrate this into our pipeline (e.g., as independent ArgoCD hooks or init containers), we need to modularize this logic.
+
+**Objective**
+Split the monolithic Python automation into standalone, modular scripts and package them into a single Docker container. This container must accept arguments to trigger specific verification suites (e.g., Control Plane vs. Data Plane) on demand.
+
+**Scope of Work**
+
+1. **Modularization (Split Logic):**
+Extract the following logic into independent scripts.
+* *Note: Ingress logic (`verify_ingress_gateway.py`) is excluded from this refactor as it is being redesigned in a separate task.*
+* **Control Plane:** `verify_controlplane.py` (Checking istiod status, etc.)
+* **Data Plane:** `verify_istio_mtls.py`, `verify_retry_after.py`, and `istioctl proxy-status`.
+
+
+2. **Code Refactoring (Modernization):**
+* **Remove Subprocess:** Replace shell commands (`subprocess.run("kubectl ...")`) with the native **Kubernetes Python Client**. This improves error handling and security.
+* **Argument Parsing:** Implement `argparse` to allow flags like `--namespace` or `--timeout`.
+
+
+3. **Containerization:**
+* Create a `Dockerfile` for the verification suite.
+* Implement an entrypoint script that accepts a "mode" argument to run the specific test (e.g., `entrypoint.sh --mode control-plane`).
+
+
+4. **Documentation:**
+* Create a `README.md` following standard templates, explaining how to run the container locally and what arguments are available.
+
+
+
+**Acceptance Criteria**
+
+* [ ] **Scripts Separated:** Logic is successfully split into distinct files (Control Plane vs. Data Plane).
+* [ ] **K8s Client Implemented:** Code no longer uses `subprocess` for standard Kubernetes operations.
+* [ ] **Docker Image Built:** A Docker image is successfully built.
+* [ ] **Argument Execution Verified:**
+* Running `docker run ... --mode control-plane` executes only control plane checks.
+* Running `docker run ... --mode data-plane` executes only mTLS/proxy checks.
+
+
+* [ ] **Documentation:** README includes build instructions and usage examples.
+
+**Technical Notes**
+
+* **Repo:** `af-toolkit` / `platform-automation`
+* **Library:** Use `kubernetes` (official Python client).
+* **Excluded:** `verify_ingress_gateway.py` (Deprecating).
 
 ---
 
-**Title:** Design and Implement Reliable Istio Ingress Verification for ArgoCD Pipeline
+### Why I made these changes:
 
-**Type:** Story / Task
-**Priority:** High
-**Labels:** `istio`, `automation`, `argocd`, `design`
-
----
-
-### **Description**
-
-**Context:**
-We are deprecating our current Ingress verification method (`run_ingress_tests`), which relies on an internal "hairpin" technique (exec-ing into a pod and `curl`-ing the Ingress Gateway's **internal ClusterIP**). This method is technically incorrect for testing Ingress (North-South traffic) and has proven unreliable in our App Cluster, failing with TLS handshake errors due to sidecar/mesh conflicts.
-
-**Objective:**
-We need to design a robust, "correct" verification strategy that simulates real external user traffic. This new test will replace the deprecated function and must be integrated into our automation pipeline (likely as an ArgoCD PostSync hook).
-
-**Goal:**
-Create a **Design Document** outlining a new Ingress verification approach that validates:
-
-1. **Public/External Connectivity:** Ensuring the Ingress Gateway is reachable via its external LoadBalancer/DNS.
-2. **TLS Termination:** Verifying certificates are served correctly.
-3. **Routing Rules:** Confirming `VirtualService` and `Gateway` configurations route traffic to the correct backend.
-
-### **Scope of Work**
-
-1. **Research Valid Verification Patterns:**
-* Evaluate options for running tests from "outside" the mesh (e.g., a standalone runner, a Lambda function, or a pod explicitly excluded from the mesh).
-* Determine how to safely target the external LoadBalancer IP from within our CI/CD environment.
-
-
-2. **ArgoCD Integration Strategy:**
-* Define how this test will run as a PostSync hook.
-* Define success/failure criteria (e.g., specific HTTP codes, timeout handling).
-
-
-3. **Create Design Document:**
-* Draft a document detailing the proposed architecture, required permissions, and implementation steps.
-
-
-
-### **Acceptance Criteria**
-
-* [ ] **Design Document Created:** A finalized design doc is reviewed and approved by the team.
-* *Must include:* Diagram of traffic flow for the test (Source -> LoadBalancer -> Gateway -> Pod).
-
-
-* [ ] **Deprecation Plan:** Confirmation that the old internal `curl` method will be removed.
-* [ ] **Feasibility Check:** The proposed solution is verified to work with our specific network policies and ArgoCD setup.
-
-### **Technical Notes**
-
-* **Deprecated Method:** `curl --resolve ... <ClusterIP>` (Do not use).
-* **Target State:** The test should reflect a true client request entering the cluster via the external LoadBalancer.
+1. **Connected the dots:** I explicitly noted to **exclude** the Ingress script. There is no point in refactoring `verify_ingress_gateway.py` (changing `subprocess` to `k8s-client`) if you are about to delete it in the other ticket.
+2. **Clarified the "Entrypoint":** I added the requirement for an entrypoint script/logic. Simply having separate files isn't enough for a Docker container; you need a way to tell the container *which* file to run when it starts.
+3. **Emphasized the Python Client:** Moving from `subprocess` to the K8s client is a significant code change, so I elevated it to a primary scope item rather than a footer note.
