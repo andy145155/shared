@@ -2,40 +2,22 @@
     "Version": "2012-10-17",
     "Statement": [
         {
-            "Sid": "S3ReportBucketAccess",
+            "Sid": "S3WritePermissions",
             "Effect": "Allow",
             "Action": [
                 "s3:PutObject",
-                "s3:GetObject",
-                "s3:ListBucket"
+                "s3:PutObjectAcl"
             ],
-            "Resource": [
-                "arn:aws:s3:::YOUR_REPORT_BUCKET_NAME",
-                "arn:aws:s3:::YOUR_REPORT_BUCKET_NAME/*"
-            ]
+            "Resource": "arn:aws:s3:::your-bucket-name/*"
         },
         {
-            "Sid": "AllowCrossAccountAssume",
-            "Effect": "Allow",
-            "Action": "sts:AssumeRole",
-            "Resource": "arn:aws:iam::*:role/YOUR_TARGET_ROLE_NAME"
-        }
-    ]
-}
-
-
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Sid": "ConfigReadAccess",
+            "Sid": "KMSEncryptionPermissions",
             "Effect": "Allow",
             "Action": [
-                "config:DescribeConfigRules",
-                "config:GetComplianceDetailsByConfigRule",
-                "config:DescribeConfigurationRecorders"
+                "kms:GenerateDataKey",
+                "kms:Decrypt"
             ],
-            "Resource": "*"
+            "Resource": "arn:aws:kms:region:account-id:key/key-id"
         }
     ]
 }
