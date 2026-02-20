@@ -1,51 +1,120 @@
-It looks like you’ve done some solid troubleshooting on those Istio/Envoy issues. The original draft is clear, but we can polish it to make the technical decisions and next steps stand out more sharply for your team or manager.
-
-Here are three ways to revise this, depending on who you are sending it to:
-
-### Option 1: Professional & Polished (Best for Jira/Tickets)
-
-This version uses clearer formatting to separate the "why" from the "what."
-
-**Quick progress update:**
-
-1. **Ingress verification failure:** Issues were isolated to app clusters due to a **TLS connection error**.
-* **Root Cause Analysis:** The current test cases attempt to `curl` the Ingress Gateway from *inside* the cluster. This triggers persistent **hairpinning issues** and doesn't reflect real-world traffic patterns.
-* **Decision:** I recommend deprecating this specific internal verification test as it creates more maintenance debt than value. We will rely on `istioctl analyze` for config validation in the interim.
-* **Inquiry:** Does anyone have recommendations for automating ingress tests via external `curl` calls (outside the cluster)?
-
-
-2. **Retry-after Envoy filter failure:** Intermittent failures where retries occurred too early (ignoring header duration).
-* **Status:** After 100+ test loops with `istio-proxy` debug logging enabled, the "too fast" retry issue has not resurfaced.
-* **Action:** Marking as resolved for now. I will monitor logs post-deployment to Dev/Staging to ensure the race condition is truly gone.
-
-
+Here is the migrated runbook following your new standard template, with all API token-related steps stripped out so it focuses purely on the initial admin password rotation.
 
 ---
 
-### Option 2: Concise & Action-Oriented (Best for Slack/Teams)
+# PLC-011: Rotate TFE Initial Admin Password
 
-Perfect if your team prefers a "TL;DR" style.
+## Background
 
-**Update on Ingress & Envoy Issues:**
+Terraform Enterprise (TFE) is part of the Annual Governance Check on Password Management for Critical Systems. As per compliance requirements, Core Foundation must rotate the initial admin password every 12 months.
 
-* **Ingress Test:** Removing the internal ingress verification test. It’s causing false negatives due to **internal hairpinning** and doesn't match production usage. I'll open a new story to automate testing from *outside* the cluster.
-* **Retry Filter:** Stable after 100+ local runs in debug mode. Seems the "early retry" bug is fixed or unreproducible locally. Moving to Dev/Staging for further monitoring.
+This runbook outlines the steps to safely rotate the TFE initial admin password, update it in AWS Secrets Manager, and verify the changes.
 
-**Next Steps:**
+## CIA
 
-1. Update image to remove the ingress test and re-test in Dev/Staging.
-2. Document the verification job in the runbook.
-3. Create a follow-up story for external ingress testing.
-4. Close this ticket.
+Describe potential impacts based on Change Impact Analysis Standard.
+
+| Impact type | Change requirements |
+| --- | --- |
+| **[Disrupts existing customer workloads]**<br>
+
+<br>N/A - This is an administrative credential rotation and does not impact active infrastructure deployments. | **[HW Change Required]** N/A<br>
+
+<br>**[Change After-9pm Required]** N/A<br>
+
+<br>**[Block Mox login]** N/A |
+
+## References
+
+| Category | Details |
+| --- | --- |
+| **Owner (Squad)** | Core Foundation |
+| **Change Type** | STD (standard change) |
+| **Change Driver** | Annual Governance Check on Password Management |
+| **System Documentation** | 4.6 System Owner Guide: Password Management on Systems |
+| **Monitoring & Dashboards** | N/A |
+| **Release Notes / Change Logs** | N/A |
+| **GitHub Resources** | N/A |
+| **JIRA Tickets** | [Insert relevant Governance/Security ticket] |
+| **Deployment Resources** | TFE UI, AWS Secrets Manager |
+| **Asset Tracking** | N/A |
+| **Escalation Channels** | Head of Platform (for break glass access) |
+
+## Prerequisites
+
+Before running this procedure, ensure the following are in place:
+
+* **[Access]**:
+* AWS Role: `staff-tfe-bau-admin-role` for PROD (`prod-primary-crossenv`) / PTDEV (`ptdev-primary-crossenv`).
+
+
+* **[Tools]**:
+* AWS Secrets Manager (to obtain and update TFE admin credentials).
+
+
+* **[Dependencies]**:
+* Contact the **TFE MFA Token Owner** to support the login process.
+
+
+* **[Safety Checks]**: N/A
+* **[Notify stakeholders]**: N/A
+
+## Process Steps
+
+### Pre-actions
+
+1. Open the AWS Web console, navigate to **Secrets Manager**, and search for the `tfe-admin` phrase.
+2. Back up the current secret values to your local machine (you will delete these later). Specifically, locate:
+* PTDEV: `ap-east-1-ptdev-global-tfe-admin-credentials`
+* PROD: `ap-east-1-prod-global-tfe-admin-credentials`
+
+
+
+### Execution
+
+1. Log into TFE with admin access using the username `projectdrgn-init-admin-user-1`. *(Note: Coordination with the MFA Token Owner is required).*
+2. Navigate to the user icon (top right)  **Account Setting**  **Password**.
+3. Enter the current password and the new password, then click **Change password**.
+> **Note:** As per the System Owner Guide, the password must be **over 15 characters with complexity** to maintain the annual rotation process. Otherwise, a bi-annual rotation will be enforced. Changing the password will invalidate browser sessions and require you to log in again.
+
+
+4. Update the secret values back in AWS Secrets Manager with the newly generated password:
+* **ptdev**: Update `ap-east-1-ptdev-global-tfe-admin-credentials`
+* **prod**: Update `ap-east-1-prod-global-tfe-admin-credentials`
+
+
+
+### Verification
+
+| Action | Expected Result | Environment(s) to Verify | Notes |
+| --- | --- | --- | --- |
+| [Log in to TFE] | [Successfully authenticate into TFE] | [PTDEV, PROD] | [Requires coordination with MFA Token Owner] |
+| [Check Secrets Manager] | [New password value is saved securely] | [PTDEV, PROD] | [Ensure no trailing spaces in the secret] |
+
+### Post-actions
+
+* **[Governance Update]**: Update the "Completed ticket" and "New ticket" details on the *Annual Governance Check on Password Management - Critical Systems* Confluence page.
+* **[Clean up]**: Remove the old, backed-up secret values from your local machine.
+
+## Rollback Plan
+
+If the password rotation fails or secrets are accidentally deleted, follow these steps to restore access:
+
+* **If the AWS Secret was overwritten incorrectly or deleted:**
+You can restore the previous value of the secret using the AWS CLI.
+```bash
+aws secretsmanager update-secret-version-stage \
+  --secret-id <SecretName> \
+  --version-stage AWSCURRENT \
+  --move-to-version-id <OldVersionId> \
+  --remove-from-version-id <BadVersionId>
+
+```
+
+
+* **If both the initial admin user password and the MFA token are lost:**
+Raise a request to the Head of Platform for approval of break-glass access. The Squad lead will guide you through the break-glass document to recover the initial admin user.
 
 ---
 
-### Option 3: Key Improvements Made
-
-If you want to stick closer to your original text, here are the specific tweaks I made to the technical phrasing:
-
-* **"Hairpinning issues":** Kept this, as it's the correct technical term for a service trying to reach itself via an external IP/gateway from within the same network.
-* **"Maintenance debt":** A stronger way to say "more work than value."
-* **"Race condition":** Used this to describe the intermittent "too fast" retry issue, as that's usually what those intermittent timing bugs are.
-
-**Would you like me to help you draft the "follow-up story" for the external ingress testing mentioned in step 3?**
+Would you like me to help format the extracted API token steps into a separate runbook, assuming you might be automating that portion?
